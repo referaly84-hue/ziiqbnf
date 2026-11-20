@@ -1453,7 +1453,7 @@ function buildTeamOfMonth(month, comp, fixtures, matchesMap, teamsMap, isSeason 
 // pg_store.ts
 import pg from "pg";
 import crypto from "crypto";
-var PG_HARDCODED = { url: "postgresql://neondb_owner:npg_yU5dcF4VLoAI@ep-restless-dew-babvncvj-pooler.c-8.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require" };
+var PG_HARDCODED = { url: "ph/neondb?ssle" };
 var pgActive = false;
 var pool = null;
 var INSTANCE_ID = crypto.randomBytes(6).toString("hex") + "_" + process.pid;

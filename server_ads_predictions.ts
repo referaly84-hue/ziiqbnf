@@ -144,6 +144,46 @@ export const ADSGRAM_BLOCKS: AdsgramBlockDef[] = [
     maxPerCycle: 30,
   },
   {
+    key: 'nt_u21_propose_player',
+    label: 'Сборная России U21 — Предложить игрока в сборную',
+    category: 'national',
+    format: 'short',
+    durationSec: 10,
+    requiresClick: false,
+    defaultBlockId: '60931',
+    maxPerCycle: 30,
+  },
+  {
+    key: 'nt_u21_vote_player',
+    label: 'Сборная России U21 — Голосовать за игрока в сборную',
+    category: 'national',
+    format: 'short',
+    durationSec: 5,
+    requiresClick: false,
+    defaultBlockId: 'int-60569',
+    maxPerCycle: 30,
+  },
+  {
+    key: 'nt_u21_propose_opp',
+    label: 'Сборная России U21 — Предложить соперника на матч',
+    category: 'national',
+    format: 'short',
+    durationSec: 10,
+    requiresClick: false,
+    defaultBlockId: '60932',
+    maxPerCycle: 30,
+  },
+  {
+    key: 'nt_u21_vote_opp',
+    label: 'Сборная России U21 — Голосовать за соперника сборной',
+    category: 'national',
+    format: 'short',
+    durationSec: 5,
+    requiresClick: false,
+    defaultBlockId: 'int-60925',
+    maxPerCycle: 30,
+  },
+  {
     key: 'interview_ask',
     label: 'Интервью после матча — Задать вопрос игроку',
     category: 'interview',
@@ -272,7 +312,8 @@ export interface AdServerContext {
   admin: (req: Request, res: Response, next: () => void) => void;
   fail: (res: Response, msg: string, code?: number) => void;
   cleanTxt: (v: any, max?: number) => string;
-  ensureNationalTeam: () => any;
+  ensureNationalTeam: (teamType?: 'main' | 'u21') => any;
+  ageOfPlayer?: (p: any) => number | null;
   ensureInitialBudgets: () => void;
   compName: (id: string) => string;
   getTgBotToken?: () => string;
@@ -2064,13 +2105,39 @@ export function verifyAndConsumeAdProof(
   return { ok: true };
 }
 
-function ensureNationalAdState(db: any, actorKey: string) {
+const NATIONAL_BLOCK_KEYS = [
+  'nt_propose_player',
+  'nt_vote_player',
+  'nt_propose_opp',
+  'nt_vote_opp',
+  'nt_u21_propose_player',
+  'nt_u21_vote_player',
+  'nt_u21_propose_opp',
+  'nt_u21_vote_opp',
+] as const;
+
+type NationalBlockKey = (typeof NATIONAL_BLOCK_KEYS)[number];
+
+function normalizeNationalBlockKey(blockKey?: string): NationalBlockKey {
+  if ((NATIONAL_BLOCK_KEYS as readonly string[]).includes(String(blockKey || ''))) {
+    return blockKey as NationalBlockKey;
+  }
+  return 'nt_propose_player';
+}
+
+function ensureNationalAdState(db: any, actorKey: string, blockKey?: string) {
   db.nationalAdUsage ||= {};
   const now = Date.now();
-  let st = db.nationalAdUsage[actorKey];
+  let actorMap = db.nationalAdUsage[actorKey];
+  if (!actorMap || typeof actorMap !== 'object' || typeof actorMap.views === 'number' || typeof actorMap.cycleStartedAt === 'number') {
+    actorMap = {};
+    db.nationalAdUsage[actorKey] = actorMap;
+  }
+  const bk = normalizeNationalBlockKey(blockKey);
+  let st = actorMap[bk];
   if (!st || typeof st !== 'object') {
     st = { cycleStartedAt: 0, views: 0, lastAdAt: 0 };
-    db.nationalAdUsage[actorKey] = st;
+    actorMap[bk] = st;
   }
   if (st.cycleStartedAt > 0 && now - st.cycleStartedAt >= CYCLE_MS) {
     st.cycleStartedAt = 0;
@@ -2083,42 +2150,42 @@ function ensureNationalAdState(db: any, actorKey: string) {
 }
 
 export function buildNationalAdSummary(db: any, actorKey: string) {
-  const st = ensureNationalAdState(db, actorKey);
   const now = Date.now();
-  const views = Math.min(NATIONAL_AD_MAX_PER_DAY, Number(st.views || 0));
-  const resetAt = st.cycleStartedAt > 0 ? st.cycleStartedAt + CYCLE_MS : null;
-  const remainingMs = resetAt ? Math.max(0, resetAt - now) : 0;
-  const cdLeft = getCooldownLeftMs(st.lastAdAt);
+  const buttons: Record<string, { limitReached: boolean; cooldownRemainingMs: number; nextAvailableAt: number | null }> = {};
+  for (const bk of NATIONAL_BLOCK_KEYS) {
+    const st = ensureNationalAdState(db, actorKey, bk);
+    const views = Math.min(NATIONAL_AD_MAX_PER_DAY, Number(st.views || 0));
+    const limitReached = views >= NATIONAL_AD_MAX_PER_DAY;
+    const cdLeft = limitReached ? 0 : getCooldownLeftMs(st.lastAdAt);
+    buttons[bk] = {
+      limitReached,
+      cooldownRemainingMs: cdLeft,
+      nextAvailableAt: cdLeft > 0 ? now + cdLeft : null,
+    };
+  }
   return {
-    views,
-    maxViews: NATIONAL_AD_MAX_PER_DAY,
-    remaining: Math.max(0, NATIONAL_AD_MAX_PER_DAY - views),
-    cycleStartedAt: st.cycleStartedAt || null,
-    resetAt,
-    remainingMs,
     cooldownMs: AD_COOLDOWN_MS,
-    cooldownRemainingMs: cdLeft,
-    nextAvailableAt: cdLeft > 0 ? now + cdLeft : null,
-    lastAdAt: st.lastAdAt || 0,
+    buttons,
   };
 }
 
 export function checkNationalAdAllowed(
   db: any,
-  actorKey: string
+  actorKey: string,
+  blockKey?: string
 ): { ok: true } | { ok: false; error: string } {
-  const st = ensureNationalAdState(db, actorKey);
+  const st = ensureNationalAdState(db, actorKey, blockKey);
   if (Number(st.views || 0) >= NATIONAL_AD_MAX_PER_DAY) {
     return {
       ok: false,
-      error: `Достигнут лимит просмотров рекламы в разделе сборной (${NATIONAL_AD_MAX_PER_DAY}/${NATIONAL_AD_MAX_PER_DAY} за 24 часа). Дождитесь сброса таймера.`,
+      error: 'На сегодня лимит пройден.',
     };
   }
   const cdLeft = getCooldownLeftMs(st.lastAdAt);
   if (cdLeft > 0) {
     return {
       ok: false,
-      error: `Перерыв между рекламами в разделе сборной: подождите ещё ${fmtCooldownWords(cdLeft)}.`,
+      error: `Перерыв между рекламами для этой кнопки: подождите ещё ${fmtCooldownWords(cdLeft)}.`,
     };
   }
   return { ok: true };
@@ -2126,23 +2193,24 @@ export function checkNationalAdAllowed(
 
 function recordNationalAdUsage(ctx: AdServerContext, actorKey: string, blockKey: string) {
   const db = ctx.getDb();
-  const st = ensureNationalAdState(db, actorKey);
+  const bk = normalizeNationalBlockKey(blockKey);
+  const st = ensureNationalAdState(db, actorKey, bk);
   const now = Date.now();
   if (!st.cycleStartedAt) st.cycleStartedAt = now;
   st.views = Number(st.views || 0) + 1;
   st.lastAdAt = now;
 
-  const dbStat = ensureDbAdStat(db, blockKey);
+  const dbStat = ensureDbAdStat(db, bk);
   dbStat.completed = Number(dbStat.completed || 0) + 1;
   dbStat.lastAt = now;
 
   const blocks = getAdsgramBlocks(db);
   pushAdEvent(ctx, {
     type: 'credit',
-    blockKey,
-    blockId: blocks[blockKey] || blockKey,
+    blockKey: bk,
+    blockId: blocks[bk] || bk,
     actorKey,
-    detail: `Реклама в разделе сборной (${st.views}/${NATIONAL_AD_MAX_PER_DAY})`,
+    detail: `Реклама в разделе сборной (${bk})`,
   });
 }
 
@@ -3120,13 +3188,8 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
         if (cdLeft > 0) {
           return ctx.fail(res, `Перерыв между рекламами РФС: подождите ещё ${fmtCooldownWords(cdLeft)}.`);
         }
-      } else if (
-        blockKey === 'nt_propose_player' ||
-        blockKey === 'nt_vote_player' ||
-        blockKey === 'nt_propose_opp' ||
-        blockKey === 'nt_vote_opp'
-      ) {
-        const ntCheck = checkNationalAdAllowed(db, actor.actorKey);
+      } else if ((NATIONAL_BLOCK_KEYS as readonly string[]).includes(blockKey)) {
+        const ntCheck = checkNationalAdAllowed(db, actor.actorKey, blockKey);
         if (!ntCheck.ok) return ctx.fail(res, ntCheck.error);
       } else if (blockKey === 'friendly_request' || blockKey === 'friendly_accept') {
         const frCd = getFriendlyCooldownSummary(db, actor.actorKey);
@@ -4094,9 +4157,15 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
   });
 
   // ─── National Team Proposals & Voting ─────────────────────────────────────────
+  const resolveNtTeam = (req: any): 'main' | 'u21' => {
+    const raw = String(req.body?.team || req.query?.team || '').trim().toLowerCase();
+    return raw === 'u21' || raw === 'u-21' || raw === 'youth' ? 'u21' : 'main';
+  };
+
   app.post('/api/national/propose-player', ctx.needClub, (req: any, res) => {
     const db = ctx.getDb();
-    const nt = ctx.ensureNationalTeam();
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
     const pid = String(req.body?.pid || '').trim();
     const note = ctx.cleanTxt(req.body?.note, 180);
     const p = ctx.player(pid);
@@ -4104,9 +4173,20 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
     if (req.me?.role !== 'admin' && p.teamId !== req.tid) {
       return ctx.fail(res, 'Предложить в сборную можно только игрока своего клуба.');
     }
-    const isRus = !p.nat || p.nat === 'RUS' || p.nat === 'Россия' || p.nation === 'Россия';
-    if (!isRus) {
-      return ctx.fail(res, 'В сборную России можно предложить только игрока с российским гражданством.');
+    const rawNat = String(p.nation || p.nationality || p.nat || p.country || 'Россия').trim().toLowerCase();
+    const hasRus = rawNat === '' || rawNat.includes('россия') || rawNat === 'rus' || rawNat === 'russia';
+    const hasOtherCap = Boolean(
+      p.playedForOtherNationalTeam ||
+      (p.otherNationalTeam && String(p.otherNationalTeam).trim().toLowerCase() !== 'россия')
+    );
+    if (!hasRus || hasOtherCap) {
+      return ctx.fail(res, 'В сборную России можно предложить только игрока с российским гражданством, не заигранного за другую сборную.');
+    }
+    if (teamType === 'u21') {
+      const pAge = ctx.ageOfPlayer ? ctx.ageOfPlayer(p) : (p.age != null ? Number(p.age) : null);
+      if (pAge === null || pAge > 21) {
+        return ctx.fail(res, `В молодёжную сборную России U21 можно предложить только игрока до 21 года включительно (сейчас ${pAge ?? '?'} л.).`);
+      }
     }
 
     const actor = resolveActor(req);
@@ -4116,10 +4196,11 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       return ctx.fail(res, 'Этот игрок уже предложен на текущий сбор — вы можете поддержать его голосом.');
     }
 
-    const ntCheck = checkNationalAdAllowed(db, actor.actorKey);
+    const adBlockKey = teamType === 'u21' ? 'nt_u21_propose_player' : 'nt_propose_player';
+    const ntCheck = checkNationalAdAllowed(db, actor.actorKey, adBlockKey);
     if (!ntCheck.ok) return ctx.fail(res, ntCheck.error);
 
-    const v = verifyAndConsumeAdProof(req.body?.adProof, 'nt_propose_player', actor.actorKey, false);
+    const v = verifyAndConsumeAdProof(req.body?.adProof, adBlockKey, actor.actorKey, false);
     if (!v.ok) return ctx.fail(res, v.error);
 
     const prof = ensureOwnerProfile(ctx, actor.actorKey);
@@ -4133,18 +4214,21 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       voters: [actor.actorKey],
       createdAt: new Date().toISOString(),
     });
-    recordNationalAdUsage(ctx, actor.actorKey, 'nt_propose_player');
+    recordNationalAdUsage(ctx, actor.actorKey, adBlockKey);
     ctx.save();
     res.json({
       ok: 1,
       adQuota: buildNationalAdSummary(db, actor.actorKey),
-      message: `${p.name} предложен в сборную России (1 голос)!`,
+      message: teamType === 'u21'
+        ? `${p.name} предложен в сборную России U21 (1 голос)!`
+        : `${p.name} предложен в сборную России (1 голос)!`,
     });
   });
 
   app.post('/api/national/vote-player', (req: any, res) => {
     const db = ctx.getDb();
-    const nt = ctx.ensureNationalTeam();
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
     const pid = String(req.body?.pid || '').trim();
     const actor = resolveActor(req);
     const { playerProposals } = getNationalProposals(nt.current);
@@ -4155,15 +4239,16 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       return ctx.fail(res, 'Вы уже отдали свой голос за этого кандидата в текущем сборе.');
     }
 
-    const ntCheck = checkNationalAdAllowed(db, actor.actorKey);
+    const adBlockKey = teamType === 'u21' ? 'nt_u21_vote_player' : 'nt_vote_player';
+    const ntCheck = checkNationalAdAllowed(db, actor.actorKey, adBlockKey);
     if (!ntCheck.ok) return ctx.fail(res, ntCheck.error);
 
-    const v = verifyAndConsumeAdProof(req.body?.adProof, 'nt_vote_player', actor.actorKey, false);
+    const v = verifyAndConsumeAdProof(req.body?.adProof, adBlockKey, actor.actorKey, false);
     if (!v.ok) return ctx.fail(res, v.error);
 
     prop.voters.push(actor.actorKey);
     prop.votes = prop.voters.length;
-    recordNationalAdUsage(ctx, actor.actorKey, 'nt_vote_player');
+    recordNationalAdUsage(ctx, actor.actorKey, adBlockKey);
     ctx.save();
     res.json({
       ok: 1,
@@ -4175,21 +4260,33 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
 
   app.post('/api/national/propose-opponent', (req: any, res) => {
     const db = ctx.getDb();
-    const nt = ctx.ensureNationalTeam();
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
     const opponent = ctx.cleanTxt(req.body?.opponent, 60);
     const comment = ctx.cleanTxt(req.body?.comment, 160);
     if (opponent.length < 2) return ctx.fail(res, 'Укажите название сборной-соперника');
 
+    const oppLow = opponent.toLowerCase();
+    const isU21Opp = /\bu21\b|u-21|молод[её]ж/i.test(oppLow);
+    const isRussiaBase = /^(?:сборная\s+)?(?:основная\s+сборная\s+)?(?:росси[ия]|рф)(?:\s+(?:основн\S*|взросл\S*))?$/i.test(oppLow);
+    if (teamType === 'main' && isRussiaBase && !isU21Opp) {
+      return ctx.fail(res, 'Основная сборная не может сыграть сама с собой — выберите другую страну или «Россия U21».');
+    }
+    if (teamType === 'u21' && isU21Opp && /росси|рф/i.test(oppLow)) {
+      return ctx.fail(res, 'Сборная U21 не может сыграть сама с собой — выберите другую сборную или «Россия» (основную).');
+    }
+
     const actor = resolveActor(req);
     const { opponentProposals } = getNationalProposals(nt.current);
-    if (opponentProposals.some((x) => x.opponent.toLowerCase() === opponent.toLowerCase())) {
+    if (opponentProposals.some((x) => x.opponent.toLowerCase() === oppLow)) {
       return ctx.fail(res, `Сборная «${opponent}» уже есть в списке — проголосуйте за готовый вариант!`);
     }
 
-    const ntCheck = checkNationalAdAllowed(db, actor.actorKey);
+    const adBlockKey = teamType === 'u21' ? 'nt_u21_propose_opp' : 'nt_propose_opp';
+    const ntCheck = checkNationalAdAllowed(db, actor.actorKey, adBlockKey);
     if (!ntCheck.ok) return ctx.fail(res, ntCheck.error);
 
-    const v = verifyAndConsumeAdProof(req.body?.adProof, 'nt_propose_opp', actor.actorKey, false);
+    const v = verifyAndConsumeAdProof(req.body?.adProof, adBlockKey, actor.actorKey, false);
     if (!v.ok) return ctx.fail(res, v.error);
 
     const prof = ensureOwnerProfile(ctx, actor.actorKey);
@@ -4203,7 +4300,7 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       voters: [actor.actorKey],
       createdAt: new Date().toISOString(),
     });
-    recordNationalAdUsage(ctx, actor.actorKey, 'nt_propose_opp');
+    recordNationalAdUsage(ctx, actor.actorKey, adBlockKey);
     ctx.save();
     res.json({
       ok: 1,
@@ -4214,7 +4311,8 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
 
   app.post('/api/national/vote-opponent', (req: any, res) => {
     const db = ctx.getDb();
-    const nt = ctx.ensureNationalTeam();
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
     const proposalId = String(req.body?.proposalId || '').trim();
     const actor = resolveActor(req);
     const { opponentProposals } = getNationalProposals(nt.current);
@@ -4225,15 +4323,16 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       return ctx.fail(res, `Вы уже голосовали за сборную «${prop.opponent}».`);
     }
 
-    const ntCheck = checkNationalAdAllowed(db, actor.actorKey);
+    const adBlockKey = teamType === 'u21' ? 'nt_u21_vote_opp' : 'nt_vote_opp';
+    const ntCheck = checkNationalAdAllowed(db, actor.actorKey, adBlockKey);
     if (!ntCheck.ok) return ctx.fail(res, ntCheck.error);
 
-    const v = verifyAndConsumeAdProof(req.body?.adProof, 'nt_vote_opp', actor.actorKey, false);
+    const v = verifyAndConsumeAdProof(req.body?.adProof, adBlockKey, actor.actorKey, false);
     if (!v.ok) return ctx.fail(res, v.error);
 
     prop.voters.push(actor.actorKey);
     prop.votes = prop.voters.length;
-    recordNationalAdUsage(ctx, actor.actorKey, 'nt_vote_opp');
+    recordNationalAdUsage(ctx, actor.actorKey, adBlockKey);
     ctx.save();
     res.json({
       ok: 1,
@@ -4241,6 +4340,36 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       adQuota: buildNationalAdSummary(db, actor.actorKey),
       message: `Голос за матч со сборной «${prop.opponent}» учтён!`,
     });
+  });
+
+  app.post('/api/admin/national/proposal/player/delete', ctx.admin, (req: any, res) => {
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
+    const pid = String(req.body?.pid || '').trim();
+    if (!pid) return ctx.fail(res, 'Не указан игрок');
+    const { playerProposals } = getNationalProposals(nt.current);
+    const before = playerProposals.length;
+    nt.current.playerProposals = playerProposals.filter((x) => x.pid !== pid);
+    if (nt.current.playerProposals.length === before) {
+      return ctx.fail(res, 'Предложенный игрок не найден');
+    }
+    ctx.save();
+    res.json({ ok: 1, message: 'Вариант игрока удалён из списка' });
+  });
+
+  app.post('/api/admin/national/proposal/opponent/delete', ctx.admin, (req: any, res) => {
+    const teamType = resolveNtTeam(req);
+    const nt = ctx.ensureNationalTeam(teamType);
+    const proposalId = String(req.body?.proposalId || req.body?.id || '').trim();
+    if (!proposalId) return ctx.fail(res, 'Не указан вариант соперника');
+    const { opponentProposals } = getNationalProposals(nt.current);
+    const before = opponentProposals.length;
+    nt.current.opponentProposals = opponentProposals.filter((x) => x.id !== proposalId);
+    if (nt.current.opponentProposals.length === before) {
+      return ctx.fail(res, 'Вариант соперника не найден');
+    }
+    ctx.save();
+    res.json({ ok: 1, message: 'Вариант соперника удалён' });
   });
 
   // ─── Admin Ads Publisher Cabinet & Telemetry ─────────────────────────────────
@@ -4323,20 +4452,27 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       }
     }
 
-    // National proposals/votes backfill
-    const ntAllSets = [
+    // National proposals/votes backfill (Main and U21 separately)
+    const countNtSet = (sets: any[]) => {
+      let propPl = 0, votePl = 0, propOpp = 0, voteOpp = 0;
+      for (const ntItem of sets) {
+        const pp = Array.isArray(ntItem.playerProposals) ? ntItem.playerProposals : [];
+        const op = Array.isArray(ntItem.opponentProposals) ? ntItem.opponentProposals : [];
+        propPl += pp.length;
+        for (const x of pp) votePl += Math.max(0, Number(x.votes || (Array.isArray(x.voters) ? x.voters.length : 1)) - 1);
+        propOpp += op.length;
+        for (const x of op) voteOpp += Math.max(0, Number(x.votes || (Array.isArray(x.voters) ? x.voters.length : 1)) - 1);
+      }
+      return { propPl, votePl, propOpp, voteOpp };
+    };
+    const ntMainCounts = countNtSet([
       ...(db.nationalTeam?.current ? [db.nationalTeam.current] : []),
       ...(Array.isArray(db.nationalTeam?.archive) ? db.nationalTeam.archive : []),
-    ];
-    let ntPropPl = 0, ntVotePl = 0, ntPropOpp = 0, ntVoteOpp = 0;
-    for (const ntItem of ntAllSets) {
-      const pp = Array.isArray(ntItem.playerProposals) ? ntItem.playerProposals : [];
-      const op = Array.isArray(ntItem.opponentProposals) ? ntItem.opponentProposals : [];
-      ntPropPl += pp.length;
-      for (const x of pp) ntVotePl += Math.max(0, Number(x.votes || (Array.isArray(x.voters) ? x.voters.length : 1)) - 1);
-      ntPropOpp += op.length;
-      for (const x of op) ntVoteOpp += Math.max(0, Number(x.votes || (Array.isArray(x.voters) ? x.voters.length : 1)) - 1);
-    }
+    ]);
+    const ntU21Counts = countNtSet([
+      ...(db.nationalTeamU21?.current ? [db.nationalTeamU21.current] : []),
+      ...(Array.isArray(db.nationalTeamU21?.archive) ? db.nationalTeamU21.archive : []),
+    ]);
 
     // Prediction wallets stats
     const walletsObj = db.predictionWallets && typeof db.predictionWallets === 'object' ? db.predictionWallets : {};
@@ -4402,6 +4538,10 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
         case 'nt_vote_player': return '+1 голос игроку';
         case 'nt_propose_opp': return 'Соперник сборной';
         case 'nt_vote_opp': return '+1 голос сопернику';
+        case 'nt_u21_propose_player': return 'Игрок в сборную U21';
+        case 'nt_u21_vote_player': return '+1 голос игроку U21';
+        case 'nt_u21_propose_opp': return 'Соперник сборной U21';
+        case 'nt_u21_vote_opp': return '+1 голос сопернику U21';
         case 'interview_ask': return 'Вопрос игроку (5/матч)';
         default: return '—';
       }
@@ -4467,13 +4607,21 @@ export function registerAdsAndPredictionsRoutes(app: Express, ctx: AdServerConte
       } else if (def.key === 'interview_ask') {
         histCompleted = Math.max(histCompleted, totalInterviewBackfill);
       } else if (def.key === 'nt_propose_player') {
-        histCompleted = Math.max(histCompleted, ntPropPl);
+        histCompleted = Math.max(histCompleted, ntMainCounts.propPl);
       } else if (def.key === 'nt_vote_player') {
-        histCompleted = Math.max(histCompleted, ntVotePl);
+        histCompleted = Math.max(histCompleted, ntMainCounts.votePl);
       } else if (def.key === 'nt_propose_opp') {
-        histCompleted = Math.max(histCompleted, ntPropOpp);
+        histCompleted = Math.max(histCompleted, ntMainCounts.propOpp);
       } else if (def.key === 'nt_vote_opp') {
-        histCompleted = Math.max(histCompleted, ntVoteOpp);
+        histCompleted = Math.max(histCompleted, ntMainCounts.voteOpp);
+      } else if (def.key === 'nt_u21_propose_player') {
+        histCompleted = Math.max(histCompleted, ntU21Counts.propPl);
+      } else if (def.key === 'nt_u21_vote_player') {
+        histCompleted = Math.max(histCompleted, ntU21Counts.votePl);
+      } else if (def.key === 'nt_u21_propose_opp') {
+        histCompleted = Math.max(histCompleted, ntU21Counts.propOpp);
+      } else if (def.key === 'nt_u21_vote_opp') {
+        histCompleted = Math.max(histCompleted, ntU21Counts.voteOpp);
       } else if (def.key === 'coins_short') {
         histCompleted = Math.max(histCompleted, totalWalletCycleShort);
         histCoins = Math.max(histCoins, totalWalletCycleShort * 1);

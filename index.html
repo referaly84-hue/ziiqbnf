@@ -252,9 +252,9 @@ a.fxl{color:inherit}a.fxl:hover{background:var(--soft);text-decoration:none}
 .cal-chip.media_cup{background:#f3e8ff;color:#6b21a8;border-color:#e9d5ff}
 .cal-chip.fnl{background:#eff6ff;color:#1e40af;border-color:#dbeafe}
 .cal-chip.national{background:#ffe4e6;color:#9f1239;border-color:#fecdd3}
+.cal-chip.national_u21{background:#eef2ff;color:#3730a3;border-color:#c7d2fe}
 .cal-chip.other{background:var(--soft);color:var(--ink);border-color:var(--line)}
 .cal-more{font-size:10px;color:var(--muted);font-weight:600;padding:1px 4px}
-
 .cal-tourn-pill{display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:700;padding:2px 7px;border-radius:12px;border:1px solid transparent;line-height:1.2;width:fit-content;max-width:100%;text-overflow:ellipsis;white-space:nowrap;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,0.03)}
 .cal-tourn-pill .cal-tourn-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0}
 .cal-tourn-pill.rpl{background:#e9f5ee;color:#065f46;border-color:#a7f3d0}
@@ -273,6 +273,8 @@ a.fxl{color:inherit}a.fxl:hover{background:var(--soft);text-decoration:none}
 .cal-tourn-pill.media .cal-tourn-dot{background:#d97706}
 .cal-tourn-pill.national{background:#fef2f2;color:#991b1b;border-color:#fecaca}
 .cal-tourn-pill.national .cal-tourn-dot{background:#dc2626}
+.cal-tourn-pill.national_u21{background:#eef2ff;color:#3730a3;border-color:#c7d2fe}
+.cal-tourn-pill.national_u21 .cal-tourn-dot{background:#4f46e5}
 .cal-tourn-pill.other{background:#f1f5f9;color:#334155;border-color:#cbd5e1}
 .cal-tourn-pill.other .cal-tourn-dot{background:#64748b}
 .cal-tourn-badge-count{font-size:10px;padding:0 4px;border-radius:8px;background:rgba(0,0,0,0.08);font-weight:800}
@@ -1087,6 +1089,8 @@ const OFFICIAL_CLIENT_LOGOS = {
   'кдв': '/assets/aistudio/FC_KDV_Tomsk_05a0950a.png',
   'кдв томск': '/assets/aistudio/FC_KDV_Tomsk_05a0950a.png',
   'сборная россии': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
+  'сборная россии u21': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
+  'россия u21': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
   'сборная': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
   'россия': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
   'сборная рф': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
@@ -1125,6 +1129,8 @@ const COMPETITION_CLIENT_LOGOS = {
   media: '/logos/leagues/media.svg',
   russia: '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
   national: '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
+  national_u21: '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
+  u21: '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg',
   'сборная': '/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg'
 };
 
@@ -3480,12 +3486,12 @@ async function pgFixtures(app, comp = 'rpl', round) {
   </div>`;
 
   if (FX_VIEW === 'calendar') {
-    const [allRawResp, ntData] = await Promise.all([
+    const [allRawResp, ntData, ntU21Data] = await Promise.all([
       api('/fixtures').catch(() => []),
-      api('/national').catch(() => ({ breaks: [] }))
+      api('/national').catch(() => ({ breaks: [] })),
+      api('/national?team=u21').catch(() => ({ current: { matches: [] } }))
     ]);
     const allRaw = Array.isArray(allRawResp) ? allRawResp : [];
-
     const activeFilter = CAL_COMP_FILTER;
     const breaks = ntData.breaks || [];
 
@@ -3519,6 +3525,24 @@ async function pgFixtures(app, comp = 'rpl', round) {
           awayName: m.home ? m.opponent : 'Россия',
           status: 'scheduled',
           isNational: true
+        });
+      });
+    }
+    if (activeFilter === 'all' || activeFilter === 'national_u21') {
+      (ntU21Data?.current?.matches || []).forEach(m => {
+        if (!m.date) return;
+        matchesByDate[m.date] = matchesByDate[m.date] || [];
+        matchesByDate[m.date].push({
+          id: 'ntu21_' + m.id,
+          comp: 'national_u21',
+          date: m.date,
+          time: m.time,
+          label: 'Товарищеский матч U21',
+          homeName: m.home ? 'Россия U21' : m.opponent,
+          awayName: m.home ? m.opponent : 'Россия U21',
+          status: 'scheduled',
+          isNational: true,
+          isNationalU21: true
         });
       });
     }
@@ -3564,6 +3588,7 @@ async function pgFixtures(app, comp = 'rpl', round) {
         '2lb': { label: 'Вторая Б', cls: 'fnl2b', title: 'Вторая лига «Б»' },
         media: { label: 'Медиалига', cls: 'media', title: 'Winline Медиалига' },
         national: { label: '🇷🇺 Сборная', cls: 'national', title: 'Товарищеский матч сборной' },
+        national_u21: { label: '🇷🇺 Россия U21', cls: 'national_u21', title: 'Товарищеский матч молодёжной сборной U21' },
         other: { label: 'Матч', cls: 'other', title: 'Матч' }
       };
 
@@ -3605,9 +3630,10 @@ async function pgFixtures(app, comp = 'rpl', round) {
         ${isWinter ? `<div class="panel" style="background:#e0f2fe;border:1px solid #bae6fd;padding:8px 12px;margin-bottom:10px"><b>❄️ Зимний перерыв в РПЛ</b>: клубы проводят сборы и товарищеские матчи.</div>` : ''}
         ${dayList.length ? dayList.map(f => {
           if (f.isNational) {
+            const isU21Match = !!f.isNationalU21;
             return `<div class="row sp" style="padding:10px 12px;background:var(--soft);border-radius:8px;margin-bottom:8px">
-              <div style="display:flex;align-items:center;gap:8px"><img src="/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg" alt="" style="width:18px;height:18px;object-fit:contain"/><span class="tag live" style="background:#b91c1c">Сборная России</span> <b>${e(f.homeName)} — ${e(f.awayName)}</b> · ${e(f.time)}</div>
-              <a class="btn alt sm" href="#/national">В раздел Сборная</a>
+              <div style="display:flex;align-items:center;gap:8px"><img src="/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg" alt="" style="width:18px;height:18px;object-fit:contain"/><span class="tag live" style="background:${isU21Match ? '#4f46e5' : '#b91c1c'}">${isU21Match ? 'Сборная России U21' : 'Сборная России'}</span> <b>${e(f.homeName)} — ${e(f.awayName)}</b> · ${e(f.time)}</div>
+              <a class="btn alt sm" href="${isU21Match ? '#/national/u21' : '#/national'}">${isU21Match ? 'В раздел U21' : 'В раздел Сборная'}</a>
             </div>`;
           }
           return fxRow(f);
@@ -3643,6 +3669,7 @@ async function pgFixtures(app, comp = 'rpl', round) {
             <option value="media_cup" ${activeFilter === 'media_cup' ? 'selected' : ''}>Winline Кубок Лиги</option>
             <option value="fnl" ${activeFilter === 'fnl' ? 'selected' : ''}>Первая лига</option>
             <option value="national" ${activeFilter === 'national' ? 'selected' : ''}>Сборная России (паузы и матчи)</option>
+            <option value="national_u21" ${activeFilter === 'national_u21' ? 'selected' : ''}>Сборная России U21 (до 21 года)</option>
           </select>
         </div>
       </div>
@@ -12779,8 +12806,8 @@ async function pgAdmin(app) {
       const keys = d.keys || [];
       const presets = Array.isArray(mods.presets) && mods.presets.length
         ? mods.presets
-        : ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
-      const curModel = mods.primary || 'gemini-3.6-flash';
+        : ['gemini-4-hydrogen', 'gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3.1-flash-lite'];
+      const curModel = mods.primary || 'gemini-4-hydrogen';
       const isPresetModel = presets.includes(curModel);
 
       ab.innerHTML = `
@@ -12838,7 +12865,7 @@ async function pgAdmin(app) {
                 ${presets.map(m => `<option value="${e(m)}" ${curModel === m ? 'selected' : ''}>${e(m)}</option>`).join('')}
                 <option value="__custom__" ${!isPresetModel ? 'selected' : ''}>Своя модель…</option>
               </select>
-              <input id="ai_primary_model" value="${e(curModel)}" placeholder="gemini-3.6-flash" style="margin-top:6px;${isPresetModel ? 'display:none' : ''}">
+              <input id="ai_primary_model" value="${e(curModel)}" placeholder="gemini-4-hydrogen" style="margin-top:6px;${isPresetModel ? 'display:none' : ''}">
               <div class="small muted" style="margin-top:3px">Все ключи Gemini работают на этой выбранной модели по кругу (Round-Robin).</div>
             </div>
             <div>
@@ -12950,7 +12977,7 @@ async function pgAdmin(app) {
 
       $('#ai_save_btn').onclick = async () => {
         const selVal = $('#ai_primary_model_sel').value;
-        const primaryModel = selVal === '__custom__' ? ($('#ai_primary_model').value.trim() || 'gemini-3.6-flash') : selVal;
+        const primaryModel = selVal === '__custom__' ? ($('#ai_primary_model').value.trim() || 'gemini-4-hydrogen') : selVal;
         const clearEl = $('#ai_clear_worker_secret');
         const updated = await act(() => api('/admin/ai/settings', {
           primaryModel,
@@ -13017,8 +13044,8 @@ async function pgAdmin(app) {
       </div>
     </div>
     <div class="panel"><h3>Код администратора</h3><div class="code">${e(s.adminCode)}</div><p class="muted small">Его можно переопределить переменной окружения ADMIN_CODE.</p></div>
-    <div class="panel"><h3>Нейросеть и Cloudflare Worker</h3><p class="muted small">Активная модель Gemini: <code>${e(mo.gemini || 'gemini-3.6-flash')}</code> → внешний резерв: Groq → OpenRouter. Подробнее во вкладке «🧠 ИИ».</p>
-    ${[['gemini', 'Google Gemini (AI Studio)', 'gemini-3.6-flash'], ['groq', 'Groq', 'openai/gpt-oss-120b'], ['openrouter', 'OpenRouter', 'openrouter/free']].map(([n, t, d]) => `<div class="row" style="margin-top:8px"><div style="flex:1;min-width:230px">${n === 'gemini' ? `<label>${t} ${k.geminiCount ? '<span class="tag">активных ключей: ' + k.geminiCount + (k.geminiFileCount || k.geminiEnvCount ? ` (secrets.json: ${k.geminiFileCount || 0}, env: ${k.geminiEnvCount || 0})` : '') + (k.geminiCooling ? ' (на паузе: ' + k.geminiCooling + ')' : '') + '</span>' : '<span class="tag" style="background:#fef2f2;color:#991b1b;border-color:#fca5a5">ключей нет</span>'}</label><textarea id="k_gemini" rows="5" style="font:13px/1.4 ui-monospace,Consolas,monospace" autocomplete="off" placeholder="${k.geminiCount ? 'Сейчас: ' + (k.geminiTails || []).join(', ') + '. Вставьте любые ключи (по одному в строке, без ограничений — хоть 50 штук). Пусто — не менять.' : 'Вставьте ключи Gemini, по одному в строке (неограниченно: 10, 20, 50+ штук). Будет работать балансировка Round-Robin.'}"></textarea><div class="muted small" style="margin-top:3px">✨ Поддерживается любое количество ключей Gemini (до 50+). Все ключи используют одну выбранную модель по кругу (Round-Robin).</div>` : `<label>${t} ${k[n] ? '<span class="tag">ключ есть</span>' : ''}</label><input id="k_${n}" type="password" placeholder="${k[n] ? 'оставьте пустым, чтобы не менять' : 'вставьте ключ'}" autocomplete="off">`}</div><div style="flex:1;min-width:200px"><label>Модель</label><input id="m_${n}" value="${e(mo[n] || '')}" placeholder="${d}"></div></div>`).join('')}
+    <div class="panel"><h3>Нейросеть и Cloudflare Worker</h3><p class="muted small">Активная модель Gemini: <code>${e(mo.gemini || 'gemini-4-hydrogen')}</code> → внешний резерв: Groq → OpenRouter. Подробнее во вкладке «🧠 ИИ».</p>
+    ${[['gemini', 'Google Gemini (AI Studio)', 'gemini-4-hydrogen'], ['groq', 'Groq', 'openai/gpt-oss-120b'], ['openrouter', 'OpenRouter', 'openrouter/free']].map(([n, t, d]) => `<div class="row" style="margin-top:8px"><div style="flex:1;min-width:230px">${n === 'gemini' ? `<label>${t} ${k.geminiCount ? '<span class="tag">активных ключей: ' + k.geminiCount + (k.geminiFileCount || k.geminiEnvCount ? ` (secrets.json: ${k.geminiFileCount || 0}, env: ${k.geminiEnvCount || 0})` : '') + (k.geminiCooling ? ' (на паузе: ' + k.geminiCooling + ')' : '') + '</span>' : '<span class="tag" style="background:#fef2f2;color:#991b1b;border-color:#fca5a5">ключей нет</span>'}</label><textarea id="k_gemini" rows="5" style="font:13px/1.4 ui-monospace,Consolas,monospace" autocomplete="off" placeholder="${k.geminiCount ? 'Сейчас: ' + (k.geminiTails || []).join(', ') + '. Вставьте любые ключи (по одному в строке, без ограничений — хоть 50 штук). Пусто — не менять.' : 'Вставьте ключи Gemini, по одному в строке (неограниченно: 10, 20, 50+ штук). Будет работать балансировка Round-Robin.'}"></textarea><div class="muted small" style="margin-top:3px">✨ Поддерживается любое количество ключей Gemini (до 50+). Все ключи используют одну выбранную модель по кругу (Round-Robin).</div>` : `<label>${t} ${k[n] ? '<span class="tag">ключ есть</span>' : ''}</label><input id="k_${n}" type="password" placeholder="${k[n] ? 'оставьте пустым, чтобы не менять' : 'вставьте ключ'}" autocomplete="off">`}</div><div style="flex:1;min-width:200px"><label>Модель</label><input id="m_${n}" value="${e(mo[n] || '')}" placeholder="${d}"></div></div>`).join('')}
     <div class="row" style="margin-top:10px"><div style="flex:1;min-width:230px"><label>URL Cloudflare Worker (прокси)</label><input id="s_worker_url" value="${e(s.workerUrl || '')}" placeholder="https://my-proxy.workers.dev"></div><div style="flex:1;min-width:200px"><label>PROXY_SECRET</label><input id="s_worker_secret" type="password" value="" autocomplete="off" placeholder="${s.hasWorkerSecret ? '•••••• (задан, пусто — не менять)' : 'вставьте PROXY_SECRET'}"></div></div>
     <label style="margin-top:10px"><input type="checkbox" id="gr" ${s.grounding ? 'checked' : ''} style="width:auto"> Поиск Google при создании карточек (только Gemini)</label></div>
     <div class="panel"><h3>Трансляция и Telegram</h3><div class="row"><div style="flex:1;min-width:200px"><label>Секунд реального времени на минуту матча</label><input id="spm" type="number" step="0.5" value="${s.secPerMin}"></div><div style="flex:1;min-width:200px"><label>Пауза на перерыве, сек</label><input id="brk" type="number" value="${s.breakSec}"></div></div>
@@ -13078,28 +13105,42 @@ async function pgAdmin(app) {
 }
 
 let NT_TAB = 'current';
-async function pgNational(app) {
+let NT_TEAM = 'main';
+let NT_VIEW_STAGE = null;
+async function pgNational(app, subTeam) {
+  if ((subTeam === 'u21' || subTeam === 'main') && NT_TEAM !== subTeam) {
+    NT_TEAM = subTeam;
+    NT_VIEW_STAGE = null;
+  } else if (subTeam === 'u21' || subTeam === 'main') {
+    NT_TEAM = subTeam;
+  }
+  const isU21 = NT_TEAM === 'u21';
+  const teamLabel = isU21 ? 'Россия U21' : 'Россия';
   const isAdmin = S.me?.role === 'admin';
   const [data, plData] = await Promise.all([
-    api('/national'),
-    isAdmin ? api('/admin/players?q=') : Promise.resolve({ players: [] })
+    api(`/national?team=${NT_TEAM}`),
+    isAdmin ? api(`/admin/players?eligible=${NT_TEAM}&limit=1500`) : Promise.resolve([])
   ]);
-  const cur = data.current || { title: 'Ближайшая пауза на матчи сборных', stage: 'extended', extendedPlayers: [], finalPlayers: [], matches: [] };
+  const cur = data.current || { title: isU21 ? 'Ближайшая пауза молодёжной сборной U21' : 'Ближайшая пауза на матчи сборных', stage: 'extended', extendedPlayers: [], finalPlayers: [], matches: [] };
   const archive = data.archive || [];
-  const allPlayers = plData.players || [];
-
-  const activeStage = cur.stage === 'final' ? 'final' : 'extended';
+  const allPlayers = Array.isArray(plData) ? plData : (plData?.players || []);
+  const activeStage = (NT_VIEW_STAGE === 'extended' || NT_VIEW_STAGE === 'final')
+    ? NT_VIEW_STAGE
+    : (cur.stage === 'final' ? 'final' : 'extended');
   const activeList = activeStage === 'final' ? (cur.finalPlayers || []) : (cur.extendedPlayers || []);
 
   const renderPlayersTable = (list, canEdit) => {
-    if (!list.length) return '<div class="empty">Состав на ближайшую паузу ещё не опубликован.</div>';
+    if (!list.length) {
+      return `<div class="empty">${activeStage === 'final' ? 'Итоговый список (кого вызвали) ещё не сформирован.' : 'Расширенный состав на ближайшую паузу ещё не опубликован.'}</div>`;
+    }
     return `<div class="scroll-hint"><span>👉 Прокручивайте состав вправо</span></div><div class="wrap"><table>
-      <thead><tr><th>№</th><th class="l">Игрок</th><th>Поз.</th><th class="l">Клуб</th><th>Матчи</th><th>Голы</th><th>Пасы</th>${canEdit ? '<th></th>' : ''}</tr></thead>
+      <thead><tr><th>№</th><th class="l">Игрок</th><th>Поз.</th><th>Возр.</th><th class="l">Клуб</th><th>Матчи</th><th>Голы</th><th>Пасы</th>${canEdit ? '<th></th>' : ''}</tr></thead>
       <tbody>
         ${list.map((p, i) => `<tr>
           <td><b>${p.number || p.num || (i + 1)}</b></td>
           <td class="l"><b>${e(p.name)}</b></td>
           <td><span class="tag">${e(p.pos)}</span></td>
+          <td class="small muted">${p.age != null ? `${p.age} л.` : '—'}</td>
           <td class="l"><div class="t-cell">${p.teamLogo ? `<img class="t-logo" src="${p.teamLogo}" alt=""/>` : ''}<span>${e(p.teamName)}</span></div></td>
           <td>${p.matches || 0}</td>
           <td>${p.goals || 0}</td>
@@ -13135,7 +13176,7 @@ async function pgNational(app) {
         <div class="row" style="gap:12px;align-items:center;flex-wrap:wrap">
           <div style="display:flex;align-items:center;gap:8px">
             <img src="${m.home ? rusLogo : (oppLogo || rusLogo)}" alt="" class="t-logo" style="width:24px;height:24px;object-fit:contain"/>
-            <b>${m.home ? `Россия — ${e(m.opponent)}` : `${e(m.opponent)} — Россия`}</b>
+            <b>${m.home ? `${teamLabel} — ${e(m.opponent)}` : `${e(m.opponent)} — ${teamLabel}`}</b>
             <img src="${m.home ? (oppLogo || rusLogo) : rusLogo}" alt="" class="t-logo" style="width:24px;height:24px;object-fit:contain"/>
           </div>
           <div class="small muted" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
@@ -13145,7 +13186,7 @@ async function pgNational(app) {
           </div>
         </div>
         <div class="row" style="gap:8px">
-          <span class="tag">Товарищеский матч</span>
+          <span class="tag">${isU21 ? 'Товарищеский матч U21' : 'Товарищеский матч'}</span>
           ${canEdit ? `<button class="btn alt sm" data-nt-del-match="${m.id}" title="Удалить матч" style="color:#ef4444;border-color:rgba(239,68,68,0.3)">✕</button>` : ''}
         </div>
       </div>`;
@@ -13160,12 +13201,12 @@ async function pgNational(app) {
         <div class="row sp" style="margin-bottom:10px;flex-wrap:wrap;gap:8px">
           <div>
             <h3 style="margin:0">${e(cur.title)}</h3>
-            <div class="small muted">${activeStage === 'final' ? 'Итоговый состав (25 игроков)' : 'Расширенный состав (40 игроков)'} · Вызвано: ${activeList.length}</div>
+            <div class="small muted">${activeStage === 'final' ? 'Кого вызвали (итоговый состав, 25 игроков)' : 'Расширенный состав (40 игроков)'} · Вызвано: ${activeList.length}${isU21 ? ' · Возрастной лимит: до 21 года' : ''}</div>
           </div>
-          ${isAdmin ? `<div class="row" style="gap:6px">
-            <button class="btn ${activeStage === 'extended' ? '' : 'alt'} sm" data-nt-stage="extended">Расширенный (${(cur.extendedPlayers || []).length})</button>
-            <button class="btn ${activeStage === 'final' ? '' : 'alt'} sm" data-nt-stage="final">Итоговый (${(cur.finalPlayers || []).length})</button>
-          </div>` : ''}
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <button class="btn ${activeStage === 'extended' ? '' : 'alt'} sm" data-nt-stage="extended">Расширенный состав (${(cur.extendedPlayers || []).length})</button>
+            <button class="btn ${activeStage === 'final' ? '' : 'alt'} sm" data-nt-stage="final">Кого вызвали (${(cur.finalPlayers || []).length})</button>
+          </div>
         </div>
         ${renderPlayersTable(activeList, isAdmin)}
       </div>
@@ -13177,25 +13218,25 @@ async function pgNational(app) {
 
       ${isAdmin ? `
       <div class="panel" style="border:1.5px solid var(--green)">
-        <h3 style="margin:0 0 10px">Управление сборной (Админ)</h3>
+        <h3 style="margin:0 0 10px">${isU21 ? 'Управление молодёжной сборной U21 (Админ)' : 'Управление сборной (Админ)'}</h3>
         <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">
           <input id="nt_title" value="${e(cur.title)}" placeholder="Название паузы (например: Ноябрьский сбор 2026)" style="flex:1;min-width:240px">
           <button class="btn" id="nt_gen_ext">Сформировать расширенный (40) ИИ</button>
           <button class="btn" id="nt_gen_fin">Сформировать итоговый (25) ИИ</button>
-          <button class="btn" id="nt_gen_all_friendlies" style="background:#1d4ed8;color:#fff" title="Автоматически назначить товарищеские матчи сборной России на все 4 паузы сезона">⚡ Матчи на все паузы</button>
           <button class="btn alt" id="nt_arch_btn">В архив</button>
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:12px">
           <select id="nt_add_pid" style="flex:1;min-width:240px">
-            ${allPlayers.slice(0, 400).map(p => `<option value="${p.id}">${e(p.name)} (${p.pos}, ${e(teamName(p.teamId))})</option>`).join('')}
+            ${allPlayers.slice(0, 600).map(p => `<option value="${p.id}">${e(p.name)} (${p.pos}${p.age != null ? ', ' + p.age + ' л.' : ''}, ${e(teamName(p.teamId))})</option>`).join('')}
           </select>
-          <button class="btn alt" id="nt_add_btn">Добавить игрока в состав</button>
+          <button class="btn alt" id="nt_add_btn">Добавить в ${activeStage === 'final' ? 'кого вызвали' : 'расширенный состав'}</button>
         </div>
         <div style="margin-bottom:6px;font-size:12px;color:var(--muted)">
-          ℹ️ <b>Товарищеские матчи сборной:</b> выберите соперника, игровое время в окне ФИФА и настоящее время матча (МСК)
+          ℹ️ <b>Товарищеские матчи ${isU21 ? 'сборной U21' : 'сборной'}:</b> выберите соперника, игровое время в окне ФИФА и настоящее время матча (МСК)
         </div>
         <div class="row" style="gap:8px;flex-wrap:wrap;align-items:flex-end">
-          <label class="small" style="flex:2;min-width:180px">Соперник<br><input id="nt_opp" placeholder="Соперник (например: Сербия, Камерун)" style="width:100%"></label>
+          <label class="small" style="flex:2;min-width:180px">Соперник<br><input id="nt_opp" list="${isU21 ? 'nat_opp_u21_list' : 'nat_opp_main_list'}" placeholder="${isU21 ? 'Соперник (например: Россия, Сербия U21, Беларусь U21)' : 'Соперник (например: Россия U21, Сербия, Камерун)'}" style="width:100%"></label>
+          <button type="button" class="btn alt sm" id="nt_opp_quick_ru" style="margin-bottom:0" title="Подставить соперника">${isU21 ? '🇷🇺 Россия' : '⚡ Россия U21'}</button>
           <label class="small" style="flex:2;min-width:200px">🎮 Игровая дата (пауза ФИФА)<br><select id="nt_date" style="width:100%">${breakDateOptions || '<option value="2026-11-14">2026-11-14</option>'}</select></label>
           <label class="small" style="width:85px">🎮 Время<br><input id="nt_time" value="19:00" style="width:100%"></label>
           <label class="small" style="flex:1;min-width:140px">⏰ Настоящая дата<br><input type="date" id="nt_real_date" style="width:100%"></label>
@@ -13219,11 +13260,18 @@ async function pgNational(app) {
 
   app.innerHTML = `
   <div class="comp-banner" style="display:flex;align-items:center;gap:18px">
-    <img src="/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg" alt="Сборная России" class="comp-banner-logo" style="width:72px;height:72px;object-fit:contain;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.25))" onerror="this.style.display='none'"/>
+    <img src="/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg" alt="${isU21 ? 'Сборная России U21' : 'Сборная России'}" class="comp-banner-logo" style="width:72px;height:72px;object-fit:contain;filter:drop-shadow(0 2px 6px rgba(0,0,0,0.25))" onerror="this.style.display='none'"/>
     <div>
-      <h1 class="comp-banner-title" style="margin:0">Сборная России</h1>
-      <div class="comp-banner-sub">Вызов игроков на международную паузу, товарищеские матчи и архив сборов</div>
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <h1 class="comp-banner-title" style="margin:0">${isU21 ? 'Молодёжная сборная России U21' : 'Сборная России'}</h1>
+        ${isU21 ? '<span class="tag" style="background:#4f46e5;color:#fff;border-color:#4338ca;font-weight:700">До 21 года</span>' : ''}
+      </div>
+      <div class="comp-banner-sub">${isU21 ? 'Игроки до 21 года включительно · Вызов на международную паузу, товарищеские матчи и архив сборов' : 'Вызов игроков на международную паузу, товарищеские матчи и архив сборов'}</div>
     </div>
+  </div>
+  <div class="tabs" style="margin-bottom:10px">
+    <button data-nt-team="main" class="${NT_TEAM === 'main' ? 'on' : ''}">🇷🇺 Основная сборная</button>
+    <button data-nt-team="u21" class="${NT_TEAM === 'u21' ? 'on' : ''}">⚡ Сборная U21 (до 21 года)</button>
   </div>
   <div class="tabs" style="margin-bottom:16px">
     <button data-nt-tab="current" class="${NT_TAB === 'current' ? 'on' : ''}">Ближайшая пауза</button>
@@ -13232,40 +13280,58 @@ async function pgNational(app) {
   ${body}
   ${NT_TAB === 'current' ? '<div id="nt_proposals_mount"></div>' : ''}`;
   if (NT_TAB === 'current' && $('#nt_proposals_mount')) {
-    ensureExt().then(ext => ext.renderNationalProposalsSection($('#nt_proposals_mount'), { ...cur, adQuota: data.adQuota }, isAdmin, () => pgNational(app)));
+    ensureExt().then(ext => ext.renderNationalProposalsSection($('#nt_proposals_mount'), { ...cur, adQuota: data.adQuota }, isAdmin, () => pgNational(app), NT_TEAM));
   }
 
+  app.querySelectorAll('[data-nt-team]').forEach(b => b.onclick = () => {
+    const next = b.dataset.ntTeam === 'u21' ? 'u21' : 'main';
+    if (NT_TEAM === next) return;
+    NT_TEAM = next;
+    NT_VIEW_STAGE = null;
+    const targetHash = next === 'u21' ? '#/national/u21' : '#/national';
+    if (location.hash !== targetHash) history.replaceState(null, '', targetHash);
+    pgNational(app);
+  });
   app.querySelectorAll('[data-nt-tab]').forEach(b => b.onclick = () => { NT_TAB = b.dataset.ntTab; pgNational(app); });
   app.querySelectorAll('[data-nt-stage]').forEach(b => b.onclick = async () => {
-    await act(() => api('/admin/national/squad', { action: 'stage', stage: b.dataset.ntStage }));
+    const nextStage = b.dataset.ntStage === 'final' ? 'final' : 'extended';
+    NT_VIEW_STAGE = nextStage;
+    if (isAdmin) {
+      await act(() => api('/admin/national/squad', { team: NT_TEAM, action: 'stage', stage: nextStage }));
+    }
     pgNational(app);
   });
   app.querySelectorAll('[data-nt-rem]').forEach(b => b.onclick = async () => {
-    await act(() => api('/admin/national/squad', { action: 'remove', pid: b.dataset.ntRem }), 'Игрок убран из списка');
+    await act(() => api('/admin/national/squad', { team: NT_TEAM, action: 'remove', stage: activeStage, pid: b.dataset.ntRem }), 'Игрок убран из списка');
     pgNational(app);
   });
   if ($('#nt_gen_ext')) $('#nt_gen_ext').onclick = async () => {
-    const r = await act(() => api('/admin/national/generate', { stage: 'extended', title: $('#nt_title').value }), 'Расширенный состав (40) сформирован');
+    NT_VIEW_STAGE = 'extended';
+    const r = await act(() => api('/admin/national/generate', { team: NT_TEAM, stage: 'extended', title: $('#nt_title').value }), 'Расширенный состав (40) сформирован');
     if (r) pgNational(app);
   };
   if ($('#nt_gen_fin')) $('#nt_gen_fin').onclick = async () => {
-    const r = await act(() => api('/admin/national/generate', { stage: 'final', title: $('#nt_title').value }), 'Итоговый состав (25) сформирован');
-    if (r) pgNational(app);
-  };
-  if ($('#nt_gen_all_friendlies')) $('#nt_gen_all_friendlies').onclick = async () => {
-    const r = await act(() => api('/admin/friendlies/generate', {}), 'Товарищеские матчи сборной назначены на все паузы сезона!');
+    NT_VIEW_STAGE = 'final';
+    const r = await act(() => api('/admin/national/generate', { team: NT_TEAM, stage: 'final', title: $('#nt_title').value }), 'Итоговый состав (25) сформирован');
     if (r) pgNational(app);
   };
   if ($('#nt_add_btn')) $('#nt_add_btn').onclick = async () => {
-    const r = await act(() => api('/admin/national/squad', { action: 'add', pid: $('#nt_add_pid').value }), 'Игрок добавлен в сборную');
+    const r = await act(() => api('/admin/national/squad', { team: NT_TEAM, action: 'add', stage: activeStage, pid: $('#nt_add_pid').value }), 'Игрок добавлен в сборную');
     if (r) pgNational(app);
   };
   if ($('#nt_real_date') && !$('#nt_real_date').value) {
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Moscow' });
     $('#nt_real_date').value = today;
   }
+  if ($('#nt_opp_quick_ru')) $('#nt_opp_quick_ru').onclick = () => {
+    if ($('#nt_opp')) {
+      $('#nt_opp').value = isU21 ? 'Россия' : 'Россия U21';
+      $('#nt_opp').focus();
+    }
+  };
   if ($('#nt_add_match')) $('#nt_add_match').onclick = async () => {
     const r = await act(() => api('/admin/national/match', {
+      team: NT_TEAM,
       opponent: $('#nt_opp').value,
       gameDate: $('#nt_date').value,
       gameTime: $('#nt_time').value,
@@ -13278,11 +13344,12 @@ async function pgNational(app) {
     if (r) pgNational(app);
   };
   app.querySelectorAll('[data-nt-del-match]').forEach(b => b.onclick = async () => {
-    await act(() => api('/admin/national/match/delete', { matchId: b.dataset.ntDelMatch }), 'Товарищеский матч удалён');
+    await act(() => api('/admin/national/match/delete', { team: NT_TEAM, matchId: b.dataset.ntDelMatch }), 'Товарищеский матч удалён');
     pgNational(app);
   });
   if ($('#nt_arch_btn')) $('#nt_arch_btn').onclick = async () => {
-    const r = await act(() => api('/admin/national/archive', {}), 'Сбор отправлен в архив');
+    NT_VIEW_STAGE = null;
+    const r = await act(() => api('/admin/national/archive', { team: NT_TEAM }), 'Сбор отправлен в архив');
     if (r) pgNational(app);
   };
 }
@@ -14581,7 +14648,7 @@ function renderRplClubDossiers() {
     <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:12px;margin-bottom:16px;border-bottom:1px solid rgba(255,255,255,0.08);padding-bottom:14px">
       <div>
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
-          <span style="font-size:20px">🔎</span>
+          <span style="font-size:20px">������</span>
           <h3 style="margin:0;font-family:Unbounded,sans-serif;font-size:17px;color:#f0c419">Подробные досье всех 16 команд Пути РПЛ</h3>
           <span class="tag" style="background:#1b5c3f;color:#fff;font-size:11px;font-weight:700">16 клубов</span>
         </div>
@@ -16297,5 +16364,7 @@ function ensureExt() {
 </script>
 <script type="module" src="/src/ads_predictions_client.ts"></script>
 <datalist id="nat_list"><option value="Россия"><option value="Беларусь"><option value="Казахстан"><option value="Армения"><option value="Киргизия"><option value="Украина"><option value="Грузия"><option value="Азербайджан"><option value="Узбекистан"><option value="Таджикистан"><option value="Молдова"><option value="Сербия"><option value="Хорватия"><option value="Черногория"><option value="Босния и Герцеговина"><option value="Словения"><option value="Болгария"><option value="Румыния"><option value="Польша"><option value="Чехия"><option value="Словакия"><option value="Венгрия"><option value="Греция"><option value="Турция"><option value="Германия"><option value="Франция"><option value="Испания"><option value="Португалия"><option value="Италия"><option value="Англия"><option value="Нидерланды"><option value="Бельгия"><option value="Швейцария"><option value="Австрия"><option value="Дания"><option value="Швеция"><option value="Норвегия"><option value="Финляндия"><option value="Бразилия"><option value="Аргентина"><option value="Колумбия"><option value="Уругвай"><option value="Эквадор"><option value="Чили"><option value="Парагвай"><option value="Венесуэла"><option value="Мексика"><option value="США"><option value="Нигерия"><option value="Гана"><option value="Камерун"><option value="Сенегал"><option value="Кот-д’Ивуар"><option value="Мали"><option value="Марокко"><option value="Алжир"><option value="Египет"><option value="Япония"><option value="Южная Корея"><option value="Иран"><option value="Ирак"><option value="Австралия"></datalist>
+<datalist id="nat_opp_main_list"><option value="Россия U21"><option value="Беларусь"><option value="Казахстан"><option value="Армения"><option value="Киргизия"><option value="Грузия"><option value="Азербайджан"><option value="Узбекистан"><option value="Таджикистан"><option value="Молдова"><option value="Сербия"><option value="Хорватия"><option value="Черногория"><option value="Босния и Герцеговина"><option value="Словения"><option value="Болгария"><option value="Румыния"><option value="Польша"><option value="Чехия"><option value="Словакия"><option value="Венгрия"><option value="Греция"><option value="Турция"><option value="Германия"><option value="Франция"><option value="Испания"><option value="Португалия"><option value="Италия"><option value="Англия"><option value="Нидерланды"><option value="Бельгия"><option value="Швейцария"><option value="Австрия"><option value="Дания"><option value="Швеция"><option value="Норвегия"><option value="Финляндия"><option value="Бразилия"><option value="Аргентина"><option value="Колумбия"><option value="Уругвай"><option value="Эквадор"><option value="Чили"><option value="Парагвай"><option value="Венесуэла"><option value="Мексика"><option value="США"><option value="Нигерия"><option value="Гана"><option value="Камерун"><option value="Сенегал"><option value="Кот-д’Ивуар"><option value="Мали"><option value="Марокко"><option value="Алжир"><option value="Египет"><option value="Япония"><option value="Южная Корея"><option value="Иран"><option value="Ирак"><option value="Австралия"></datalist>
+<datalist id="nat_opp_u21_list"><option value="Россия"><option value="Беларусь U21"><option value="Сербия U21"><option value="Казахстан U21"><option value="Узбекистан U21"><option value="Армения U21"><option value="Азербайджан U21"><option value="Турция U21"><option value="Бразилия U21"><option value="Аргентина U21"><option value="Беларусь"><option value="Казахстан"><option value="Армения"><option value="Киргизия"><option value="Грузия"><option value="Азербайджан"><option value="Узбекистан"><option value="Таджикистан"><option value="Молдова"><option value="Сербия"><option value="Хорватия"><option value="Черногория"><option value="Босния и Герцеговина"><option value="Словения"><option value="Болгария"><option value="Румыния"><option value="Польша"><option value="Чехия"><option value="Словакия"><option value="Венгрия"><option value="Греция"><option value="Турция"><option value="Бразилия"><option value="Аргентина"><option value="Иран"><option value="Египет"></datalist>
 </body>
 </html>

@@ -29,8 +29,9 @@ import zlib from "zlib";
 import crypto2 from "crypto";
 import path from "path";
 import { GoogleGenAI, ThinkingLevel } from "@google/genai";
-const DEFAULT_GEMINI_PRIMARY_MODEL = "gemini-3.6-flash";
+const DEFAULT_GEMINI_PRIMARY_MODEL = "gemini-4-hydrogen";
 const GEMINI_PRESET_MODELS = [
+  "gemini-4-hydrogen",
   "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
@@ -40,6 +41,19 @@ function resolveGeminiModel(rawModel) {
   const m = String(rawModel || "").trim();
   if (!m) return DEFAULT_GEMINI_PRIMARY_MODEL;
   const lower = m.toLowerCase();
+  if (
+    lower === "4" ||
+    lower === "4.0" ||
+    lower === "4 hydrogen" ||
+    lower === "gemini 4" ||
+    lower === "gemini 4 flash" ||
+    lower === "gemini-4-flash" ||
+    lower === "gemini 4 hydrogen" ||
+    lower === "gemini-4-hydrogen" ||
+    lower === "hydrogen"
+  ) {
+    return "gemini-4-hydrogen";
+  }
   if (lower === "3.8" || lower === "3.8 flash" || lower === "3,8-flash" || lower === "gemini 3.8 flash" || lower === "gemini 3,8-flash" || lower === "gemini-3.8-flash" || lower === "gemini-3.8") {
     return DEFAULT_GEMINI_PRIMARY_MODEL;
   }
@@ -1453,7 +1467,7 @@ function buildTeamOfMonth(month, comp, fixtures, matchesMap, teamsMap, isSeason 
 // pg_store.ts
 import pg from "pg";
 import crypto from "crypto";
-var PG_HARDCODED = { url: "ph/neondb?ssle" };
+var PG_HARDCODED = { url: "postgresql://neondb_owner:npg_yU5dcF4VLoAI@ep-restless-dew-babvncvj-pooler.c-8.eu-central-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require" };
 var pgActive = false;
 var pool = null;
 var INSTANCE_ID = crypto.randomBytes(6).toString("hex") + "_" + process.pid;
@@ -4859,8 +4873,18 @@ globalThis.fetch = (async (input, init) => {
   const newUrl = base + route[1] + url.slice(route[0].length);
   const secret = String(HARDCODED.workerSecret || "").trim();
   if (typeof Request !== "undefined" && input instanceof Request) {
-    const req = new Request(newUrl, input);
-    if (secret) req.headers.set("x-proxy-secret", secret);
+    const h = new Headers(input.headers);
+    if (secret) h.set("x-proxy-secret", secret);
+    const reqInit: any = {
+      method: input.method,
+      headers: h,
+      signal: input.signal
+    };
+    if (!["GET", "HEAD"].includes(input.method.toUpperCase()) && input.body) {
+      reqInit.body = input.body;
+      reqInit.duplex = "half";
+    }
+    const req = new Request(newUrl, reqInit);
     return _origFetch(req, init);
   }
   const newInit = { ...(init || {}) };
@@ -6515,7 +6539,6 @@ function load() {
       }
     }
   }
-  ensureSeasonFriendlies(yCur);
   for (const k of ["squads", "lineups", "tactics", "sessions"]) {
     if (!db[k]) db[k] = {};
   }
@@ -8268,7 +8291,13 @@ function httpErr(status, body) {
 }
 function parseGeminiErrorDetails(err: any) {
   const isAbort = err?.name === "AbortError" || /aborted/i.test(String(err?.message || ""));
-  const msg = isAbort ? "Превышен таймаут ожидания ответа от Gemini API" : String(err?.message || err || "");
+  const causeCode = String(err?.cause?.code || "").trim();
+  const causeMsg = String(err?.cause?.message || "").trim();
+  const baseMsg = String(err?.message || err || "");
+  const causeSuffix = !isAbort && (causeCode || causeMsg) && !baseMsg.includes(causeMsg || causeCode)
+    ? ` (${[causeCode, causeMsg].filter(Boolean).join(": ")})`
+    : "";
+  const msg = isAbort ? "Превышен таймаут ожидания ответа от Gemini API" : `${baseMsg}${causeSuffix}`;
   let status = isAbort ? 408 : Number(err?.status || (err?.code && Number(err.code) >= 100 ? err.code : 0) || 0);
   if (!status) {
     const m = msg.match(/"code"\s*:\s*(\d{3})/) || msg.match(/\bHTTP\s+(\d{3})\b/i) || msg.match(/\bstatus(?:\s+code)?[:\s]+(\d{3})\b/i);
@@ -8278,6 +8307,10 @@ function parseGeminiErrorDetails(err: any) {
   if (!status && /PERMISSION_DENIED/i.test(msg)) status = 403;
   if (!status && /RESOURCE_EXHAUSTED|quota|rate.?limit/i.test(msg)) status = 429;
   if (!status && /NOT_FOUND/i.test(msg)) status = 404;
+  const networkError = !isAbort && /fetch failed|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|UND_ERR_|socket hang up|network/i.test(msg);
+  if (!status && networkError) {
+    status = /TIMEOUT|ETIMEDOUT/i.test(msg) ? 504 : 502;
+  }
 
   let retryAfterMs = 0;
   const rdMatch = msg.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/i) || msg.match(/retry\s+in\s+(\d+(?:\.\d+)?)s/i);
@@ -8286,7 +8319,7 @@ function parseGeminiErrorDetails(err: any) {
   }
   const daily = /PerDay|per day|daily|GenerateRequestsPerDay/i.test(msg);
   const authInvalid = status === 401 || status === 403 || /API_KEY_INVALID|API key not valid|PERMISSION_DENIED/i.test(msg);
-  return { msg, status, retryAfterMs, daily, authInvalid };
+  return { msg, status, retryAfterMs, daily, authInvalid, networkError };
 }
 var aiKeyStats = /* @__PURE__ */ new Map();
 function aiTodayStr() {
@@ -8501,7 +8534,7 @@ function recordAiKeyAttempt(key: string, model: string, info: { ok: boolean; ms:
   persistAiUsageToSettings();
 }
 async function callProv(p, sys, user, o) {
-  const timeoutMs = o.timeoutMs || (o.max >= 16e3 ? 9e4 : 25e3);
+  const timeoutMs = o.timeoutMs || (o.max >= 16e3 ? 15e4 : o.max >= 4e3 ? 6e4 : 3e4);
   const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     if (p.n === "gemini") {
@@ -8547,44 +8580,59 @@ async function callProv(p, sys, user, o) {
         const totalTokens = Number(um.totalTokenCount || (promptTokens + outputTokens + thoughtTokens));
         return { promptTokens, outputTokens, thoughtTokens, totalTokens };
       };
-      try {
+      const runGeminiOnce = async (reqConfig: any) => {
+        if (Number(o.max || 0) >= 4000) {
+          let fullText = "";
+          let lastUsageMeta: any = null;
+          const stream = await ai.models.generateContentStream({
+            model,
+            contents: user,
+            config: reqConfig
+          });
+          for await (const chunk of stream) {
+            const t = chunk?.text;
+            if (t) fullText += t;
+            if (chunk?.usageMetadata) lastUsageMeta = chunk.usageMetadata;
+          }
+          o._lastUsage = extractUsage({ usageMetadata: lastUsageMeta });
+          return fullText;
+        }
         const resp = await ai.models.generateContent({
           model,
           contents: user,
-          config
+          config: reqConfig
         });
         o._lastUsage = extractUsage(resp);
         return resp.text || "";
+      };
+      try {
+        return await runGeminiOnce(config);
       } catch (err: any) {
         const d = parseGeminiErrorDetails(err);
         if (d.status === 400 && config.thinkingConfig && /thinking/i.test(d.msg)) {
           try {
             const { thinkingConfig: _drop, ...fallbackConfig } = config;
-            const resp2 = await ai.models.generateContent({
-              model,
-              contents: user,
-              config: fallbackConfig
-            });
-            o._lastUsage = extractUsage(resp2);
-            return resp2.text || "";
+            return await runGeminiOnce(fallbackConfig);
           } catch (err2: any) {
             const d2 = parseGeminiErrorDetails(err2);
-            if (d2.status) {
+            if (d2.status || d2.networkError) {
               throw Object.assign(new Error(d2.msg), {
                 status: d2.status,
                 daily: d2.daily,
                 authInvalid: d2.authInvalid,
+                networkError: d2.networkError,
                 retryAfterMs: d2.retryAfterMs
               });
             }
             throw err2;
           }
         }
-        if (d.status) {
+        if (d.status || d.networkError) {
           throw Object.assign(new Error(d.msg), {
             status: d.status,
             daily: d.daily,
             authInvalid: d.authInvalid,
+            networkError: d.networkError,
             retryAfterMs: d.retryAfterMs
           });
         }
@@ -8642,29 +8690,132 @@ function recordAiHistory(entry) {
   pgSaveAiHistoryItem(item, 50);
 }
 var keyCooldown = /* @__PURE__ */ new Map();
+var modelErrorStreak = /* @__PURE__ */ new Map<string, { streak: number; lastFailAt: number; lastOkAt: number; lastErr: string }>();
+var stickyFallbackModel: { model: string; until: number; replacedModel: string } | null = null;
 var geminiRoundRobinIndex = 0;
-var coolKey = (p, e) => {
-  const ms = e.authInvalid || e.status === 401 || e.status === 403
+function getEffectiveGeminiModel(now = Date.now()): string {
+  const primary = getGeminiModel();
+  if (stickyFallbackModel && stickyFallbackModel.until > now && stickyFallbackModel.replacedModel === primary) {
+    return stickyFallbackModel.model;
+  }
+  if (stickyFallbackModel && (stickyFallbackModel.until <= now || stickyFallbackModel.replacedModel !== primary)) {
+    stickyFallbackModel = null;
+  }
+  return primary;
+}
+function recordModelSuccess(model: string) {
+  if (!model) return;
+  const now = Date.now();
+  const prev = modelErrorStreak.get(model);
+  modelErrorStreak.set(model, {
+    streak: 0,
+    lastFailAt: prev?.lastFailAt || 0,
+    lastOkAt: now,
+    lastErr: ""
+  });
+  const primary = getGeminiModel();
+  if (model === primary) {
+    if (stickyFallbackModel) stickyFallbackModel = null;
+    return;
+  }
+  const pStreak = modelErrorStreak.get(primary);
+  const pFailedRecently = !!pStreak && pStreak.streak >= 2 && (now - pStreak.lastFailAt < 15 * 60 * 1000);
+  const pCooling = getGeminiKeys().some((k) => !!getCooldownEntry(k, primary, now));
+  if (pFailedRecently || pCooling) {
+    stickyFallbackModel = {
+      model,
+      until: now + 15 * 60 * 1000,
+      replacedModel: primary
+    };
+  }
+}
+function coolKeyId(key: string, model = ""): string {
+  return model ? `${key}::${model}` : key;
+}
+var coolKey = (p, e, modelOverride?: string) => {
+  const now = Date.now();
+  const model = modelOverride || (p?.n === "gemini" ? (p.model || getGeminiModel()) : (p?.model || ""));
+  const isAuth = !!(e.authInvalid || e.status === 401 || e.status === 403);
+  let streak = 1;
+  if (model && !isAuth) {
+    const prev = modelErrorStreak.get(model);
+    const sameWindow = prev && (now - prev.lastFailAt < 30 * 60 * 1000);
+    streak = sameWindow ? prev.streak + 1 : 1;
+    modelErrorStreak.set(model, {
+      streak,
+      lastFailAt: now,
+      lastOkAt: prev?.lastOkAt || 0,
+      lastErr: String(e.message || "").slice(0, 160)
+    });
+    if (stickyFallbackModel && stickyFallbackModel.model === model) {
+      stickyFallbackModel = null;
+    }
+  }
+  const transientMs = streak >= 3 ? 10 * 6e4 : streak === 2 ? 3 * 6e4 : 6e4;
+  const ms = isAuth
     ? 10 * 6e4
-    : e.daily
-      ? 30 * 6e4
-      : e.status === 429
-        ? (e.retryAfterMs || 65e3)
-        : e.status >= 500 || e.name === "AbortError"
-          ? 2e4
-          : 45e3;
-  keyCooldown.set(p.key, { until: Date.now() + ms, status: e.status || 0, daily: !!e.daily, authInvalid: !!e.authInvalid, reason: String(e.message || "").slice(0, 160) });
+    : e.status === 404
+      ? 60 * 6e4
+      : e.daily
+        ? 4 * 60 * 6e4
+        : e.status === 429
+          ? (e.retryAfterMs || (streak >= 2 ? 18e4 : 9e4))
+          : e.status >= 500 || e.name === "AbortError" || e.networkError
+            ? transientMs
+            : 45e3;
+  const ck = isAuth ? coolKeyId(p.key, "__AUTH__") : coolKeyId(p.key, model);
+  keyCooldown.set(ck, {
+    until: now + ms,
+    status: e.status || 0,
+    daily: !!e.daily,
+    authInvalid: isAuth,
+    notFound: e.status === 404,
+    model,
+    streak,
+    reason: String(e.message || "").slice(0, 160)
+  });
 };
 function getCooldownUntil(entry: any): number {
   if (!entry) return 0;
   return typeof entry === "number" ? entry : Number(entry.until || 0);
 }
-function isKeyBlocked(key: string, now = Date.now()): boolean {
-  const entry = keyCooldown.get(key);
-  const until = getCooldownUntil(entry);
-  if (until > now) return true;
-  if (entry) keyCooldown.delete(key);
-  return false;
+function getCooldownEntry(key: string, model = "", now = Date.now()) {
+  const authCk = coolKeyId(key, "__AUTH__");
+  const authEntry = keyCooldown.get(authCk);
+  if (authEntry) {
+    if (getCooldownUntil(authEntry) > now) return authEntry;
+    keyCooldown.delete(authCk);
+  }
+  const ck = coolKeyId(key, model);
+  const entry = keyCooldown.get(ck);
+  if (entry) {
+    if (getCooldownUntil(entry) > now) return entry;
+    keyCooldown.delete(ck);
+  }
+  if (model) {
+    const legacy = keyCooldown.get(key);
+    if (legacy) {
+      if (getCooldownUntil(legacy) > now) return legacy;
+      keyCooldown.delete(key);
+    }
+  }
+  return null;
+}
+function clearKeyCooldown(key: string, model?: string) {
+  if (!key) return;
+  if (model) {
+    keyCooldown.delete(coolKeyId(key, model));
+    keyCooldown.delete(key);
+    return;
+  }
+  for (const k of Array.from(keyCooldown.keys())) {
+    if (k === key || String(k).startsWith(`${key}::`)) {
+      keyCooldown.delete(k);
+    }
+  }
+}
+function isKeyBlocked(key: string, now = Date.now(), model = getGeminiModel()): boolean {
+  return !!getCooldownEntry(key, model, now);
 }
 async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, grounded = false } = {}) {
   const cx = aiCtx.getStore();
@@ -8674,7 +8825,23 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
   if (cx.cap && cx.calls >= cx.cap) throw Object.assign(new Error(`\u043B\u0438\u043C\u0438\u0442 \u0418\u0418-\u0437\u0430\u043F\u0440\u043E\u0441\u043E\u0432 \u043D\u0430 \u043C\u0430\u0442\u0447 (${cx.cap}) \u0438\u0441\u0447\u0435\u0440\u043F\u0430\u043D`), { capped: true });
   cx.calls++;
 
+  const now = Date.now();
   const activeGeminiModel = getGeminiModel();
+  const effectiveModel = getEffectiveGeminiModel(now);
+  const rawChain = [effectiveModel, activeGeminiModel, ...GEMINI_PRESET_MODELS].filter((m, idx, arr) => m && arr.indexOf(m) === idx);
+  const modelHealthScore = (m: string) => {
+    const st = modelErrorStreak.get(m);
+    const streak = st && (now - st.lastFailAt < 15 * 60 * 1000) ? st.streak : 0;
+    const stickyBoost = m === effectiveModel && effectiveModel !== activeGeminiModel ? -2 : 0;
+    const recentOkBoost = st && st.lastOkAt > st.lastFailAt && (now - st.lastOkAt < 15 * 60 * 1000) ? -1 : 0;
+    return streak * 10 + stickyBoost + recentOkBoost;
+  };
+  const modelChain = [...rawChain].sort((a, b) => {
+    const da = modelHealthScore(a);
+    const dbScore = modelHealthScore(b);
+    if (da !== dbScore) return da - dbScore;
+    return rawChain.indexOf(a) - rawChain.indexOf(b);
+  });
   const geminiProvsRaw = all.filter((p) => p.n === "gemini");
   const otherProvs = all.filter((p) => p.n !== "gemini");
   let gProvs = geminiProvsRaw;
@@ -8683,43 +8850,44 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
     gProvs = [...gProvs.slice(geminiRoundRobinIndex), ...gProvs.slice(0, geminiRoundRobinIndex)];
   }
 
-  const now = Date.now();
   const attempts: Array<{ p: any; model: string; grounded: boolean; fallbackCooled?: boolean }> = [];
   const cooledFallback: Array<{ p: any; model: string; grounded: boolean; until: number }> = [];
 
-  for (const p of gProvs) {
-    if (isKeyBlocked(p.key, now)) {
-      const kc = keyCooldown.get(p.key);
-      if (kc && !kc.authInvalid && !kc.daily) {
-        cooledFallback.push({ p, model: activeGeminiModel, grounded: !!grounded, until: getCooldownUntil(kc) });
+  for (const modelCandidate of modelChain) {
+    for (const p of gProvs) {
+      const kc = getCooldownEntry(p.key, modelCandidate, now);
+      if (kc) {
+        if (!kc.authInvalid && !kc.daily && !kc.notFound) {
+          cooledFallback.push({ p, model: modelCandidate, grounded: !!grounded, until: getCooldownUntil(kc) });
+        }
+        continue;
       }
-      continue;
+      attempts.push({ p, model: modelCandidate, grounded: !!grounded });
     }
-    attempts.push({ p, model: activeGeminiModel, grounded: !!grounded });
   }
   for (const p of otherProvs) {
-    if (!isKeyBlocked(p.key, now)) {
+    if (!getCooldownEntry(p.key, p.model, now)) {
       attempts.push({ p, model: p.model, grounded: false });
     }
   }
   if (!attempts.length && cooledFallback.length) {
     cooledFallback.sort((a, b) => a.until - b.until);
-    for (const cf of cooledFallback.slice(0, 3)) {
+    for (const cf of cooledFallback.slice(0, 1)) {
       attempts.push({ p: cf.p, model: cf.model, grounded: cf.grounded, fallbackCooled: true });
     }
   }
   if (!attempts.length) {
-    for (const p of gProvs) {
-      const kc = keyCooldown.get(p.key);
-      if (kc?.authInvalid) continue;
-      attempts.push({ p, model: activeGeminiModel, grounded: !!grounded, fallbackCooled: true });
-    }
+    cx.calls = Math.max(0, cx.calls - 1);
+    throw Object.assign(
+      new Error("Квота всех доступных моделей ИИ исчерпана (429 RESOURCE_EXHAUSTED). Подождите сброса лимита, переключите модель в настройках или используйте платный API-ключ."),
+      { status: 429, daily: true, quotaExhausted: true }
+    );
   }
 
-  let last;
+  let last: any;
   for (const att of attempts) {
     const p = att.p;
-    if (!att.fallbackCooled && isKeyBlocked(p.key)) {
+    if (!att.fallbackCooled && getCooldownEntry(p.key, att.model)) {
       continue;
     }
     const provRun = p.n === "gemini" ? { ...p, model: att.model } : p;
@@ -8741,8 +8909,9 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
         }
         const elapsed = Date.now() - t0;
         const usage = callOpts._lastUsage || {};
-        keyCooldown.delete(p.key);
+        clearKeyCooldown(p.key, att.model);
         if (p.n === "gemini") {
+          recordModelSuccess(att.model);
           recordAiKeyAttempt(p.key, att.model, { ok: true, ms: elapsed, usage });
         }
         llog({ task, p: provRun.id || provRun.n, model: provRun.model, ok: 1, ms: elapsed, tokens: usage.totalTokens || 0 });
@@ -8770,13 +8939,13 @@ async function llm(sys, user, { json = true, task = "", temp = 0.9, max = 16e3, 
       last = res2.err;
     }
 
-    if (last.authInvalid || last.status === 401 || last.status === 403 || last.status === 429 || last.status === 404 || last.status >= 500 || last.name === "AbortError") {
-      coolKey(p, last);
+    if (last.authInvalid || last.status === 401 || last.status === 403 || last.status === 429 || last.status === 404 || last.status >= 500 || last.name === "AbortError" || last.networkError) {
+      coolKey(p, last, att.model);
     }
     await sleep(last.badJson ? 80 : 120);
   }
   cx.calls = Math.max(0, cx.calls - 1);
-  throw last || new Error("Все ключи ИИ недоступны или исчерпали лимит");
+  throw last || Object.assign(new Error("Все ключи ИИ недоступны или исчерпали лимит"), { status: 429, quotaExhausted: true });
 }
 function repairJsonCandidate(raw: string) {
   let out = "";
@@ -11077,7 +11246,7 @@ function fakePeriod(a, b, ctx, prev) {
 async function genPeriod(a, b, ctx, prev, note, depth = 0) {
   const sys = db.settings.systemPrompt || SYS_DEFAULT;
   if (!hasLLM()) return { events: fakePeriod(a, b, ctx, prev), note, fallback: true };
-  let issues = "", lastErr = "";
+  let issues = "", lastErr = "", lastErrorObj: any = null;
   const maxAttempts = b - a >= 18 && depth === 0 ? 1 : 2;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     try {
@@ -11103,8 +11272,11 @@ async function genPeriod(a, b, ctx, prev, note, depth = 0) {
       return { events: evs, note: r?.state_at_end?.momentum_note || note, energyReport: rawEnergy, refereeReport: rawRefEval };
     } catch (e: any) {
       lastErr = e.message;
+      lastErrorObj = e;
       issues = e.message;
-      if (e.noLLM || e.capped) break;
+      if (e.noLLM || e.capped || e.authInvalid || e.daily || e.quotaExhausted || e.status === 429 || e.status === 401 || e.status === 403 || e.status === 503) {
+        throw e;
+      }
     }
   }
   if (b - a >= 14 && depth < 2) {
@@ -11113,7 +11285,12 @@ async function genPeriod(a, b, ctx, prev, note, depth = 0) {
     const r2 = await genPeriod(mid + 1, b, ctx, prev.concat(r1.events), r1.note, depth + 1);
     return { events: r1.events.concat(r2.events), note: r2.note, fallback: !!(r1.fallback || r2.fallback), energyReport: r2.energyReport || r1.energyReport || null, refereeReport: r2.refereeReport || r1.refereeReport || null };
   }
-  throw new Error(`ИИ не вернул корректный период ${a}–${b}: ${lastErr}`);
+  throw Object.assign(new Error(`ИИ не вернул корректный период ${a}–${b}: ${lastErr}`), {
+    status: lastErrorObj?.status,
+    daily: lastErrorObj?.daily,
+    authInvalid: lastErrorObj?.authInvalid,
+    quotaExhausted: lastErrorObj?.quotaExhausted
+  });
 }
 var LIGHT_SYS_ADD = `
 
@@ -11127,7 +11304,7 @@ note — одно предложение об игре. Счёт движок с
 async function genLight(ctx) {
   if (!hasLLM()) return { events: fakePeriod(1, 90, ctx, []), stats: null, note: "", energyReport: null, refereeReport: null, fallback: true };
   const sys = (db.settings.systemPrompt || SYS_DEFAULT) + LIGHT_SYS_ADD;
-  let issues = "", lastErr = "";
+  let issues = "", lastErr = "", lastErrorObj: any = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const user = buildUser(ctx, 1, 90, null, issues, "light") + "\n\nВерни сводку в режиме сводки: JSON {events, stats, energy_spent, referee_eval, note}.";
@@ -11140,11 +11317,19 @@ async function genLight(ctx) {
       return { events, stats: r?.stats || null, note: String(r?.note || ""), energyReport: rawEnergy, refereeReport: rawRefEval };
     } catch (e: any) {
       lastErr = e.message;
+      lastErrorObj = e;
       issues = e.message;
-      if (e.noLLM || e.capped) break;
+      if (e.noLLM || e.capped || e.authInvalid || e.daily || e.quotaExhausted || e.status === 429 || e.status === 401 || e.status === 403) {
+        throw e;
+      }
     }
   }
-  throw new Error(`ИИ не вернул сводку матча: ${lastErr}`);
+  throw Object.assign(new Error(`ИИ не вернул сводку матча: ${lastErr}`), {
+    status: lastErrorObj?.status,
+    daily: lastErrorObj?.daily,
+    authInvalid: lastErrorObj?.authInvalid,
+    quotaExhausted: lastErrorObj?.quotaExhausted
+  });
 }
 function applyLightStats(st, ls, ctx) {
   if (!ls) return;
@@ -11648,16 +11833,20 @@ async function runMatch(id, opts = {}) {
       }
     } catch (e: any) {
       if (!stillValid()) return;
-      console.error("матч не удалось сгенерировать:", e);
+      const isQuotaOrAuth = !!(e?.daily || e?.quotaExhausted || e?.authInvalid || e?.status === 429 || e?.status === 401 || e?.status === 403);
+      const errText = (e?.status === 429 || e?.daily || e?.quotaExhausted)
+        ? "Превышена квота ИИ (429 RESOURCE_EXHAUSTED). Подождите сброса лимита, смените модель или добавьте ключ в настройках."
+        : String(e?.message || e);
+      console.error("матч не удалось сгенерировать:", errText);
       f.aiCalls = store.calls;
       f.status = "scheduled";
       f._genToken = null;
       f._ownerId = null;
       f._ownerAt = 0;
-      f.err = e.message;
+      f.err = errText;
       if (!opts.manual) {
         f.autoRetries = (f.autoRetries || 0) + 1;
-        if (e.noLLM || f.autoRetries >= 3) {
+        if (e.noLLM || e.authInvalid || e.daily || e.quotaExhausted || (isQuotaOrAuth && f.autoRetries >= 1) || f.autoRetries >= 3) {
           f.noAuto = true;
           f.autoRetryAt = 0;
         } else {
@@ -12204,6 +12393,28 @@ function ensureSeasonFriendlies(y0) {
       nt.current.matches.push(m);
     }
   }
+  const ntU21 = ensureNationalTeam("u21");
+  const u21Matches = [
+    // Пауза 21 сентября — 6 октября (16 дней): матчи молодёжной сборной U21
+    { id: `nt_u21_${y}_1`, opponent: "Иран U21", date: `${y}-09-24`, time: "17:00", home: true, stadium: "«Арена Химки» (г. Химки)", city: "Химки" },
+    { id: `nt_u21_${y}_2`, opponent: "Сербия U21", date: `${y}-09-28`, time: "18:00", home: false, stadium: "Стадион «Караджордже» (г. Нови-Сад)", city: "Нови-Сад" },
+    { id: `nt_u21_${y}_3`, opponent: "Казахстан U21", date: `${y}-10-03`, time: "16:00", home: true, stadium: "«Ак Барс Арена» (г. Казань)", city: "Казань" },
+    // Пауза 9–17 ноября (9 дней)
+    { id: `nt_u21_${y}_4`, opponent: "Узбекистан U21", date: `${y}-11-11`, time: "17:30", home: true, stadium: "«Солидарность Самара Арена» (г. Самара)", city: "Самара" },
+    { id: `nt_u21_${y}_5`, opponent: "Беларусь U21", date: `${y}-11-15`, time: "16:30", home: true, stadium: "Стадион «Арсенал» (г. Тула)", city: "Тула" },
+    // Пауза 23–31 марта (9 дней)
+    { id: `nt_u21_${y}_6`, opponent: "Беларусь U21", date: `${y + 1}-03-25`, time: "18:00", home: false, stadium: "«Борисов-Арена» (г. Борисов)", city: "Борисов" },
+    { id: `nt_u21_${y}_7`, opponent: "Турция U21", date: `${y + 1}-03-29`, time: "17:00", home: true, stadium: "Стадион «Фишт» (г. Сочи)", city: "Сочи" },
+    // Пауза 1–9 июня (9 дней)
+    { id: `nt_u21_${y}_8`, opponent: "Египет U21", date: `${y + 1}-06-03`, time: "17:30", home: true, stadium: "«Стадион Нижний Новгород» (г. Нижний Новгород)", city: "Нижний Новгород" },
+    { id: `nt_u21_${y}_9`, opponent: "Сербия U21", date: `${y + 1}-06-07`, time: "18:00", home: true, stadium: "«Ростех Арена» (г. Калининград)", city: "Калининград" }
+  ];
+  ntU21.current.matches ||= [];
+  for (const m of u21Matches) {
+    if (!ntU21.current.matches.some((x) => x.id === m.id || x.date === m.date && x.opponent === m.opponent)) {
+      ntU21.current.matches.push(m);
+    }
+  }
 }
 function purgeAllClubFriendlies() {
   if (!db || !Array.isArray(db.fixtures)) return 0;
@@ -12459,7 +12670,6 @@ function genSeason(start, name, opts) {
   });
   db.staffDiscipline = {};
   ensureDualTimes(season, true);
-  ensureSeasonFriendlies(y0);
   invalidateAgg();
   save();
 }
@@ -17478,7 +17688,7 @@ app.get("/api/admin/overview", admin, (req, res) => {
       geminiFileCount: fileGeminiCount,
       geminiEnvCount: envGemini.length,
       geminiTails: activeGemini.map((k) => "\u2026" + k.slice(-4)),
-      geminiCooling: activeGemini.filter((k) => isKeyBlocked(k)).length,
+      geminiCooling: activeGemini.filter((k) => isKeyBlocked(k, Date.now(), getGeminiModel())).length,
       groq: HARDCODED.groqKeys.length > 0 || !!process.env.GROQ_API_KEY,
       openrouter: HARDCODED.openrouterKeys.length > 0 || !!process.env.OPENROUTER_API_KEY
     },
@@ -17530,10 +17740,9 @@ function buildAdminAiStatusPayload() {
 
   const keysOut = keysMeta.map((km, idx) => {
     const st = ensureKeyStat(km.key);
-    const kc = keyCooldown.get(km.key);
+    const kc = getCooldownEntry(km.key, activeModel, now);
     const kcUntil = getCooldownUntil(kc);
-    const keyBlocked = kcUntil > now;
-    if (!keyBlocked && kc) keyCooldown.delete(km.key);
+    const keyBlocked = !!kc && kcUntil > now;
 
     let status = "ready";
     let cooldownRemainingSec = 0;
@@ -17587,6 +17796,7 @@ function buildAdminAiStatusPayload() {
     today: aiTodayStr(),
     models: {
       primary: activeModel,
+      effective: getEffectiveGeminiModel(now),
       presets: GEMINI_PRESET_MODELS,
       groq: HARDCODED.groqKeys.length || process.env.GROQ_API_KEY ? HARDCODED.groqModel : "",
       openrouter: HARDCODED.openrouterKeys.length || process.env.OPENROUTER_API_KEY ? HARDCODED.openrouterModel : ""
@@ -17652,6 +17862,8 @@ app.post("/api/admin/ai/settings", admin, (req, res) => {
     saveSecretsFile(secUpdates);
   }
   keyCooldown.clear();
+  modelErrorStreak.clear();
+  stickyFallbackModel = null;
   save();
   if (db.settings.auto) setTimeout(runAutoStartTick, 50);
   res.json(buildAdminAiStatusPayload());
@@ -17660,10 +17872,12 @@ app.post("/api/admin/ai/reset-cooldowns", admin, (req, res) => {
   const keyId = String(req.body?.keyId || "").trim();
   if (!keyId) {
     keyCooldown.clear();
+    modelErrorStreak.clear();
+    stickyFallbackModel = null;
   } else {
     const match = getGeminiKeysWithMeta().find((k) => k.keyId === keyId);
     if (match) {
-      keyCooldown.delete(match.key);
+      clearKeyCooldown(match.key);
     }
   }
   res.json(buildAdminAiStatusPayload());
@@ -17684,7 +17898,7 @@ app.post("/api/admin/ai/test-key", admin, async (req, res) => {
       const reply = await callProv({ n: "gemini", id: `test_${km.keyId}`, key: km.key, model, max: 8192 }, "", "Ответь одним словом: ОК", callOpts);
       const elapsed = Date.now() - t0;
       const usage = callOpts._lastUsage || {};
-      keyCooldown.delete(km.key);
+      clearKeyCooldown(km.key, model);
       recordAiKeyAttempt(km.key, model, { ok: true, ms: elapsed, usage });
       llog({ task: "admin_key_test", p: `gemini(${km.tail})`, model, ok: 1, ms: elapsed, tokens: usage.totalTokens || 0 });
       results.push({ keyId: km.keyId, tail: km.tail, model, ok: true, ms: elapsed, reply: String(reply || "").trim().slice(0, 60), usage });
@@ -17693,7 +17907,7 @@ app.post("/api/admin/ai/test-key", admin, async (req, res) => {
       recordAiKeyAttempt(km.key, model, { ok: false, ms: elapsed, errMsg: e?.message || String(e), status: e?.status || 0 });
       llog({ task: "admin_key_test", p: `gemini(${km.tail})`, model, ok: 0, ms: elapsed, err: String(e?.message || e).slice(0, 160) });
       if (e?.authInvalid || e?.status === 401 || e?.status === 403 || e?.status === 429 || e?.status === 404 || e?.status >= 500 || e?.name === "AbortError") {
-        coolKey({ key: km.key }, e);
+        coolKey({ n: "gemini", key: km.key, model }, e, model);
       }
       results.push({ keyId: km.keyId, tail: km.tail, model, ok: false, ms: elapsed, status: e?.status || 0, error: String(e?.message || e).slice(0, 180) });
     }
@@ -17932,8 +18146,18 @@ app.get("/api/admin/players", admin, (req, res) => {
   const q2 = norm(req.query.q || "");
   let l = db.players;
   if (req.query.teamId) l = l.filter((p) => p.teamId === req.query.teamId);
+  const eligible = String(req.query.eligible || "").trim().toLowerCase();
+  if (eligible === "u21") {
+    l = l.filter((p) => isRussianNationalEligible(p, "u21"));
+  } else if (eligible === "main" || eligible === "rus") {
+    l = l.filter((p) => isRussianNationalEligible(p, "main"));
+  }
   if (q2) l = l.filter((p) => norm(p.name).includes(q2));
-  res.json(l.slice(0, 300).map(pubPlayer));
+  const limit = Math.min(2000, Math.max(50, Number(req.query.limit) || (eligible ? 1500 : 300)));
+  if (eligible) {
+    l = [...l].sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0) || String(a.name || "").localeCompare(String(b.name || ""), "ru"));
+  }
+  res.json(l.slice(0, limit).map(pubPlayer));
 });
 app.post("/api/admin/transfers/clear-offers", admin, (req, res) => {
   const reqCount = (db.transferRequests || []).length;
@@ -18385,7 +18609,7 @@ app.get("/api/admin/ai-queue", admin, (req, res) => {
     running,
     queued: queue.length,
     keys: provList().length,
-    keysCooling: provList().filter((p) => (keyCooldown.get(p.key) || 0) > now).length,
+    keysCooling: provList().filter((p) => isKeyBlocked(p.key, now, p.model)).length,
     lastHour: { ok: log.filter((l) => l.ok).length, fail: log.filter((l) => !l.ok).length },
     items: items.slice(0, 80)
   });
@@ -20789,7 +21013,39 @@ app.post("/api/admin/transfer/direct", admin, (req, res) => {
     message: `\u0417\u0430\u043F\u0440\u043E\u0441 \u043D\u0430 ${isLoan ? "\u0430\u0440\u0435\u043D\u0434\u0443" : "\u0442\u0440\u0430\u043D\u0441\u0444\u0435\u0440"} \u0438\u0433\u0440\u043E\u043A\u0430 ${p.name} (${feeStr}) \u043E\u0442\u043F\u0440\u0430\u0432\u043B\u0435\u043D \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0443 \xAB${fromTeam?.name}\xBB. \u041F\u0435\u0440\u0435\u0445\u043E\u0434 \u0441\u043E\u0441\u0442\u043E\u0438\u0442\u0441\u044F \u043F\u0440\u0438 \u0441\u043E\u0433\u043B\u0430\u0441\u0438\u0438 \u043A\u043B\u0443\u0431\u0430.`
   });
 });
-function ensureNationalTeam() {
+function normalizeNationalTeamType(raw?: any): "main" | "u21" {
+  const s = String(raw || "").trim().toLowerCase();
+  return s === "u21" || s === "u-21" || s === "youth" ? "u21" : "main";
+}
+function isRussianNationalEligible(p: any, teamType: "main" | "u21" = "main") {
+  if (!p) return false;
+  const rawNat = String(p.nation || p.nationality || p.nat || p.country || "Россия").trim().toLowerCase();
+  const hasRus = rawNat === "" || rawNat.includes("россия") || rawNat === "rus" || rawNat === "russia";
+  if (!hasRus) return false;
+  if (p.playedForOtherNationalTeam) return false;
+  const otherNt = norm(p.otherNationalTeam || "");
+  if (otherNt && otherNt !== "россия" && otherNt !== "russia" && otherNt !== "rus") return false;
+  if (teamType === "u21") {
+    const a = ageOfPlayer(p);
+    if (a === null || a > 21) return false;
+  }
+  return true;
+}
+function ensureNationalTeam(teamType: "main" | "u21" = "main") {
+  const tt = normalizeNationalTeamType(teamType);
+  if (tt === "u21") {
+    db.nationalTeamU21 ||= {
+      current: {
+        title: "Ближайшая пауза молодёжной сборной U21",
+        stage: "extended",
+        extended: [],
+        final: [],
+        matches: []
+      },
+      archive: []
+    };
+    return db.nationalTeamU21;
+  }
   db.nationalTeam ||= {
     current: {
       title: "\u0411\u043B\u0438\u0436\u0430\u0439\u0448\u0430\u044F \u043F\u0430\u0443\u0437\u0430 \u043D\u0430 \u043C\u0430\u0442\u0447\u0438 \u0441\u0431\u043E\u0440\u043D\u044B\u0445",
@@ -20802,7 +21058,8 @@ function ensureNationalTeam() {
   };
   return db.nationalTeam;
 }
-function enrichNationalBreak(brk) {
+function enrichNationalBreak(brk, teamType: "main" | "u21" = "main") {
+  const tt = normalizeNationalTeamType(teamType);
   const enrichIds = (ids) => (ids || []).map((id) => {
     const p = player(id);
     if (!p) return null;
@@ -20810,6 +21067,8 @@ function enrichNationalBreak(brk) {
       id: p.id,
       name: p.name,
       pos: p.pos,
+      age: ageOfPlayer(p),
+      nation: p.nation || "Россия",
       teamId: p.teamId,
       teamName: tn(p.teamId),
       teamLogo: teamLogo(p.teamId),
@@ -20822,6 +21081,8 @@ function enrichNationalBreak(brk) {
   }).filter(Boolean);
   const matches = (brk.matches || []).map((m) => ({
     ...m,
+    teamType: tt,
+    teamLabel: tt === "u21" ? "Россия U21" : "Россия",
     gameDate: m.gameDate || m.date,
     gameTime: m.gameTime || m.time || "19:00",
     realDate: m.realDate || m.date,
@@ -20839,6 +21100,7 @@ function enrichNationalBreak(brk) {
       ...pr,
       playerName: p?.name || "Игрок",
       pos: p?.pos || "ЦП",
+      age: p ? ageOfPlayer(p) : null,
       teamId: p?.teamId || pr.proposedByTeamId,
       teamName: p?.teamId ? tn(p.teamId) : pr.proposedByName,
       teamLogo: p?.teamId ? teamLogo(p.teamId) : "",
@@ -20855,6 +21117,7 @@ function enrichNationalBreak(brk) {
   const enrichedOpponentProposals = [...opponentProposals].sort((a, b) => b.votes - a.votes);
   return {
     ...brk,
+    teamType: tt,
     teamLogo: "/assets/aistudio/russia_russia-national-team.football-logos.cc_2a5e3ddc.svg",
     matches,
     extendedPlayers: enrichIds(brk.extended),
@@ -20864,25 +21127,37 @@ function enrichNationalBreak(brk) {
   };
 }
 app.get("/api/national", (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.query.team);
+  const nt = ensureNationalTeam(teamType);
   const actor = resolveActor(req);
   const nationalBreaks = (db.internationalBreaks || DEFAULT_INTERNATIONAL_BREAKS).filter((b) => b.id.startsWith("ib_"));
   res.json({
-    current: enrichNationalBreak(nt.current),
-    archive: (nt.archive || []).map(enrichNationalBreak),
+    team: teamType,
+    current: enrichNationalBreak(nt.current, teamType),
+    archive: (nt.archive || []).map((b) => enrichNationalBreak(b, teamType)),
     breaks: nationalBreaks,
     adQuota: buildNationalAdSummary(db, actor.actorKey)
   });
 });
 app.post("/api/admin/national/generate", admin, async (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.body.team);
+  const nt = ensureNationalTeam(teamType);
   const stage = req.body.stage === "final" ? "final" : "extended";
   const count = stage === "final" ? 25 : 40;
   if (req.body.title) nt.current.title = String(req.body.title).trim();
-  let pool2 = db.players.filter((p) => !p.nat || p.nat === "RUS" || p.nat === "\u0420\u043E\u0441\u0441\u0438\u044F");
+  let pool2 = db.players.filter((p) => isRussianNationalEligible(p, teamType));
+  if (teamType === "u21") {
+    const senior = ensureNationalTeam("main");
+    if (senior.current?.stage === "final" && Array.isArray(senior.current.final) && senior.current.final.length) {
+      const seniorSet = new Set(senior.current.final);
+      const withoutSenior = pool2.filter((p) => !seniorSet.has(p.id));
+      if (withoutSenior.length >= count) pool2 = withoutSenior;
+    }
+  }
   if (stage === "final" && nt.current.extended?.length >= 25) {
     const extSet = new Set(nt.current.extended);
-    pool2 = pool2.filter((p) => extSet.has(p.id));
+    const narrowed = pool2.filter((p) => extSet.has(p.id));
+    if (narrowed.length >= 20) pool2 = narrowed;
   }
   const { votesMap, notesByPid, aiInstructionSuffix } = buildNationalProposalAiLines(nt.current);
   const sortedPool = [...pool2].sort(
@@ -20902,16 +21177,20 @@ app.post("/api/admin/national/generate", admin, async (req, res) => {
         (p) => {
           const votes = votesMap.get(p.id) || 0;
           const pNote = notesByPid.get(p.id);
-          const vTag = votes > 0 ? `|\u041F\u0420\u0415\u0414\u041B\u041E\u0416\u0415\u041D:${votes} \u0433\u043E\u043B.${pNote ? ` (${pNote})` : ""}` : "";
-          return `${p.id}|${p.name}|${p.pos}|${tn(p.teamId)}|OVR:${p.ovr || 70}|\u041C:${p.matches || 0}|\u0413:${p.goals || 0}|\u041F:${p.assists || 0}|\u0420\u0435\u0439\u0442:${Number(p.rating || 0).toFixed(2)}${vTag}`;
+          const pAge = ageOfPlayer(p);
+          const vTag = votes > 0 ? `|ПРЕДЛОЖЕН:${votes} гол.${pNote ? ` (${pNote})` : ""}` : "";
+          return `${p.id}|${p.name}|${p.pos}|Возраст:${pAge ?? "?"}|${tn(p.teamId)}|OVR:${p.ovr || 70}|М:${p.matches || 0}|Г:${p.goals || 0}|П:${p.assists || 0}|Рейт:${Number(p.rating || 0).toFixed(2)}${vTag}`;
         }
       ).join("\n");
-      const sys = "\u0422\u044B \u2014 \u0433\u043B\u0430\u0432\u043D\u044B\u0439 \u0442\u0440\u0435\u043D\u0435\u0440 \u0441\u0431\u043E\u0440\u043D\u043E\u0439 \u0420\u043E\u0441\u0441\u0438\u0438 \u043F\u043E \u0444\u0443\u0442\u0431\u043E\u043B\u0443. \u0412\u044B\u0431\u0438\u0440\u0430\u0439 \u0441\u043E\u0441\u0442\u0430\u0432 \u0441\u0442\u0440\u043E\u0433\u043E \u043F\u043E \u043F\u043E\u0437\u0438\u0446\u0438\u0438 (\u043C\u0438\u043D\u0438\u043C\u0443\u043C 3 \u0432\u0440\u0430\u0442\u0430\u0440\u044F, 8 \u0437\u0430\u0449\u0438\u0442\u043D\u0438\u043A\u043E\u0432, 8 \u043F\u043E\u043B\u0443\u0437\u0430\u0449\u0438\u0442\u043D\u0438\u043A\u043E\u0432, 4 \u043D\u0430\u043F\u0430\u0434\u0430\u044E\u0449\u0438\u0445) \u0438 \u0442\u0435\u043A\u0443\u0449\u0435\u0439 \u0438\u0433\u0440\u043E\u0432\u043E\u0439 \u0444\u043E\u0440\u043C\u0435/\u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043A\u0435." + aiInstructionSuffix;
-      const prompt = `\u0421\u0444\u043E\u0440\u043C\u0438\u0440\u0443\u0439 ${stage === "final" ? "\u0418\u0422\u041E\u0413\u041E\u0412\u042B\u0419 \u0441\u043E\u0441\u0442\u0430\u0432 (\u0440\u043E\u0432\u043D\u043E 25 \u0438\u0433\u0440\u043E\u043A\u043E\u0432)" : "\u0420\u0410\u0421\u0428\u0418\u0420\u0415\u041D\u041D\u042B\u0419 \u0441\u043E\u0441\u0442\u0430\u0432 (\u0440\u043E\u0432\u043D\u043E 40 \u0438\u0433\u0440\u043E\u043A\u043E\u0432)"} \u0441\u0431\u043E\u0440\u043D\u043E\u0439 \u0420\u043E\u0441\u0441\u0438\u0438 \u043D\u0430 \u0431\u043B\u0438\u0436\u0430\u0439\u0448\u0443\u044E \u043F\u0430\u0443\u0437\u0443 \u0438\u0437 \u0441\u043F\u0438\u0441\u043A\u0430 \u043A\u0430\u043D\u0434\u0438\u0434\u0430\u0442\u043E\u0432:
-${candidates}
-
-\u0412\u0435\u0440\u043D\u0438 JSON: {"ids": ["id1", "id2", ...]}`;
-      const raw = await llm(sys, prompt, { json: true, task: "national_squad", temp: 0.3, max: 2e3 });
+      const teamLabelSys = teamType === "u21"
+        ? "молодёжной сборной России U21 (игроки до 21 года включительно)"
+        : "сборной России";
+      const teamLabelPrompt = teamType === "u21"
+        ? "молодёжной сборной России U21 (до 21 года)"
+        : "сборной России";
+      const sys = `Ты — главный тренер ${teamLabelSys} по футболу. Выбирай состав строго по позиции (минимум 3 вратаря, 8 защитников, 8 полузащитников, 4 нападающих) и текущей игровой форме/статистике.` + aiInstructionSuffix;
+      const prompt = `Сформируй ${stage === "final" ? "ИТОГОВЫЙ состав (ровно 25 игроков)" : "РАСШИРЕННЫЙ состав (ровно 40 игроков)"} ${teamLabelPrompt} на ближайшую паузу из списка кандидатов:\n${candidates}\n\nВерни JSON: {"ids": ["id1", "id2", ...]}`;
+      const raw = await llm(sys, prompt, { json: true, task: teamType === "u21" ? "national_u21_squad" : "national_squad", temp: 0.3, max: 2e3 });
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed.ids)) {
         const validSet = new Set(sortedPool.map((p) => p.id));
@@ -20923,25 +21202,53 @@ ${candidates}
   }
   if (chosenIds.length < Math.min(count, sortedPool.length)) {
     const have = new Set(chosenIds);
+    const posQuota: Record<string, { poses: Set<string>; min: number }> = {
+      gk: { poses: new Set(["ВР"]), min: stage === "final" ? 3 : 4 },
+      def: { poses: new Set(["ЦЗ", "ЛЗ", "ПЗ", "ЛФЗ", "ПФЗ"]), min: stage === "final" ? 8 : 12 },
+      mid: { poses: new Set(["ОП", "ЦП", "ПП", "ЛП", "АП"]), min: stage === "final" ? 8 : 14 },
+      fwd: { poses: new Set(["ЦФ", "ПВ", "ЛВ", "СТ"]), min: stage === "final" ? 4 : 7 },
+    };
+    const byId = new Map(sortedPool.map((p) => [p.id, p]));
+    const countPos = (poses: Set<string>) => chosenIds.filter((id) => poses.has(String(byId.get(id)?.pos || ""))).length;
+    for (const qRule of Object.values(posQuota)) {
+      for (const p of sortedPool) {
+        if (chosenIds.length >= count) break;
+        if (countPos(qRule.poses) >= qRule.min) break;
+        if (!have.has(p.id) && qRule.poses.has(String(p.pos || ""))) {
+          chosenIds.push(p.id);
+          have.add(p.id);
+        }
+      }
+    }
     for (const p of sortedPool) {
+      if (chosenIds.length >= count) break;
       if (!have.has(p.id)) {
         chosenIds.push(p.id);
         have.add(p.id);
-        if (chosenIds.length >= count) break;
       }
     }
   }
   nt.current.stage = stage;
   nt.current[stage] = chosenIds;
   save();
-  res.json({ ok: 1, current: enrichNationalBreak(nt.current) });
+  res.json({ ok: 1, team: teamType, current: enrichNationalBreak(nt.current, teamType) });
 });
 app.post("/api/admin/national/squad", admin, (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.body.team);
+  const nt = ensureNationalTeam(teamType);
   const { action, pid, stage } = req.body;
   const st = stage || nt.current.stage || "extended";
   nt.current[st] ||= [];
   if (action === "add" && pid) {
+    const p = player(pid);
+    if (!p) return fail(res, "Игрок не найден");
+    if (!isRussianNationalEligible(p, teamType)) {
+      if (teamType === "u21") {
+        const pAge = ageOfPlayer(p);
+        return fail(res, `В сборную U21 можно вызвать только российского игрока до 21 года включительно (${p.name}: ${p.nation || "Россия"}, ${pAge ?? "?"} л.).`);
+      }
+      return fail(res, `Игрок ${p.name} не имеет права выступать за сборную России.`);
+    }
     if (!nt.current[st].includes(pid)) nt.current[st].push(pid);
   } else if (action === "remove" && pid) {
     nt.current[st] = nt.current[st].filter((id) => id !== pid);
@@ -20949,17 +21256,28 @@ app.post("/api/admin/national/squad", admin, (req, res) => {
     nt.current.stage = stage;
   }
   save();
-  res.json({ ok: 1, current: enrichNationalBreak(nt.current) });
+  res.json({ ok: 1, team: teamType, current: enrichNationalBreak(nt.current, teamType) });
 });
 app.post("/api/admin/national/match", admin, (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.body.team);
+  const nt = ensureNationalTeam(teamType);
   const { opponent, date, time, gameDate, gameTime, realDate, realTime, home } = req.body;
-  if (!opponent) return fail(res, "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 \u0441\u043E\u043F\u0435\u0440\u043D\u0438\u043A\u0430");
+  const oppName = String(opponent || "").trim();
+  if (!oppName) return fail(res, "Укажите соперника");
+  const oppLow = oppName.toLowerCase();
+  const isU21Opp = /\bu21\b|u-21|молод[её]ж/i.test(oppLow);
+  const isRussiaBase = /^(?:сборная\s+)?(?:основная\s+сборная\s+)?(?:росси[ия]|рф)(?:\s+(?:основн\S*|взросл\S*))?$/i.test(oppLow);
+  if (teamType === "main" && isRussiaBase && !isU21Opp) {
+    return fail(res, "Основная сборная не может сыграть сама с собой — выберите другую страну или «Россия U21».");
+  }
+  if (teamType === "u21" && isU21Opp && /росси|рф/i.test(oppLow)) {
+    return fail(res, "Сборная U21 не может сыграть сама с собой — выберите другую сборную или «Россия» (основную).");
+  }
   const gDate = String(gameDate || date || "").trim();
-  if (!gDate) return fail(res, "\u0423\u043A\u0430\u0436\u0438\u0442\u0435 \u0438\u0433\u0440\u043E\u0432\u0443\u044E \u0434\u0430\u0442\u0443 \u043C\u0430\u0442\u0447\u0430");
+  if (!gDate) return fail(res, "Укажите игровую дату матча");
   const nationalBreaks = (db.internationalBreaks || DEFAULT_INTERNATIONAL_BREAKS).filter((b) => b.id.startsWith("ib_"));
   const isValidDate = nationalBreaks.some((b) => gDate >= b.start && gDate <= b.end);
-  if (!isValidDate) return fail(res, "\u041C\u0430\u0442\u0447 \u0441\u0431\u043E\u0440\u043D\u043E\u0439 \u043C\u043E\u0436\u0435\u0442 \u043F\u0440\u043E\u0432\u043E\u0434\u0438\u0442\u044C\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 \u0434\u0430\u0442\u044B \u043E\u0444\u0438\u0446\u0438\u0430\u043B\u044C\u043D\u044B\u0445 \u043F\u0430\u0443\u0437 \u043D\u0430 \u0441\u0431\u043E\u0440\u043D\u044B\u0435!");
+  if (!isValidDate) return fail(res, "Матч сборной может проводиться только в даты официальных пауз на сборные!");
   const gTime = String(gameTime || time || "19:00").trim();
   const rDate = String(realDate || todayMsk()).trim();
   const rTime = String(realTime || "19:00").trim();
@@ -20976,33 +21294,35 @@ app.post("/api/admin/national/match", admin, (req, res) => {
     home: home !== false
   });
   save();
-  res.json({ ok: 1, current: enrichNationalBreak(nt.current) });
+  res.json({ ok: 1, team: teamType, current: enrichNationalBreak(nt.current, teamType) });
 });
 app.post("/api/admin/national/match/delete", admin, (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.body.team);
+  const nt = ensureNationalTeam(teamType);
   const matchId = req.body.matchId || req.body.id;
   if (matchId) {
     nt.current.matches = (nt.current.matches || []).filter((m) => m.id !== matchId);
     save();
   }
-  res.json({ ok: 1, current: enrichNationalBreak(nt.current) });
+  res.json({ ok: 1, team: teamType, current: enrichNationalBreak(nt.current, teamType) });
 });
 app.post("/api/admin/national/archive", admin, (req, res) => {
-  const nt = ensureNationalTeam();
+  const teamType = normalizeNationalTeamType(req.body.team);
+  const nt = ensureNationalTeam(teamType);
   nt.archive ||= [];
   nt.archive.unshift({
     ...nt.current,
     archivedAt: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)
   });
   nt.current = {
-    title: "\u0421\u043B\u0435\u0434\u0443\u044E\u0449\u0430\u044F \u043F\u0430\u0443\u0437\u0430 \u043D\u0430 \u043C\u0430\u0442\u0447\u0438 \u0441\u0431\u043E\u0440\u043D\u044B\u0445",
+    title: teamType === "u21" ? "Следующая пауза молодёжной сборной U21" : "Следующая пауза на матчи сборных",
     stage: "extended",
     extended: [],
     final: [],
     matches: []
   };
   save();
-  res.json({ ok: 1 });
+  res.json({ ok: 1, team: teamType });
 });
 app.post("/api/admin/friendlies/generate", admin, (req, res) => {
   const yCur = parseInt(String(db.settings?.season || S()).slice(0, 4), 10) || 2026;
@@ -21011,8 +21331,9 @@ app.post("/api/admin/friendlies/generate", admin, (req, res) => {
   invalidateAgg();
   save();
   const natCount = (db.nationalTeam?.current?.matches || []).length;
+  const natU21Count = (db.nationalTeamU21?.current?.matches || []).length;
   const clubCount = (db.fixtures || []).filter((f) => f.comp === FRIENDLY_COMP).length;
-  res.json({ ok: 1, breaks: db.internationalBreaks, nationalMatches: natCount, clubMatches: clubCount });
+  res.json({ ok: 1, breaks: db.internationalBreaks, nationalMatches: natCount, nationalU21Matches: natU21Count, clubMatches: clubCount });
 });
 app.post("/api/admin/friendlies/clear", admin, (req, res) => {
   const deletedCount = purgeAllClubFriendlies();
@@ -21887,6 +22208,37 @@ if (!db.settings.clubFriendliesPurgedV1) {
   saveNow();
   if (purged > 0) console.log(`[friendlies] Удалено товарищеских матчей: ${purged}`);
 }
+if (!db.settings.nationalFriendliesAndSquadsClearedV1) {
+  const purged = purgeAllClubFriendlies();
+  const ntMain = ensureNationalTeam("main");
+  ntMain.current.matches = [];
+  ntMain.current.extended = [];
+  ntMain.current.final = [];
+  ntMain.current.stage = "extended";
+  const ntU21 = ensureNationalTeam("u21");
+  ntU21.current.matches = [];
+  ntU21.current.extended = [];
+  ntU21.current.final = [];
+  ntU21.current.stage = "extended";
+  db.settings.nationalFriendliesAndSquadsClearedV1 = true;
+  saveNow();
+  console.log(`[national] Очищены товарищеские матчи и составы сборных (клубных удалено: ${purged})`);
+}
+if (!db.settings.clearStale429ErrorsV1) {
+  let clearedErrs = 0;
+  for (const f of db.fixtures || []) {
+    if (f && f.status === "scheduled" && f.err && /429|RESOURCE_EXHAUSTED|quota/i.test(String(f.err))) {
+      f.err = "";
+      f.autoRetries = 0;
+      f.autoRetryAt = 0;
+      f.noAuto = false;
+      clearedErrs++;
+    }
+  }
+  db.settings.clearStale429ErrorsV1 = true;
+  if (clearedErrs > 0) console.log(`[ai] Очищены старые ошибки квоты 429 у матчей: ${clearedErrs}`);
+  saveNow();
+}
 {
   const exp = expireFriendlies();
   const age2 = syncPlayerAges();
@@ -21952,6 +22304,7 @@ function getAdsCtx(): AdServerContext {
     fail,
     cleanTxt,
     ensureNationalTeam,
+    ageOfPlayer,
     ensureInitialBudgets,
     compName: (id: string) => db.comps?.find((c: any) => c.id === id)?.name || id,
     getTgBotToken: tgToken,
